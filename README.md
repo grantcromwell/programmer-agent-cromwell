@@ -322,7 +322,7 @@ Reproduce performance benchmarks:
 
 ## 12. License
 
-MIT License - see [`LICENSE`](LICENSE) for details.
+MIT License - see [LICENSE](https://mycromwell.org/license) for details.
 
 ---
 
@@ -331,9 +331,10 @@ MIT License - see [`LICENSE`](LICENSE) for details.
 ```bibtex
 @software{cromwell_agent,
   title={Cromwell: An Auto-Regressive Coding Agent for AMD x86-64 Architecture},
-  author={Your Name},
+  author={{MyCromwell.org}},
   year={2025},
   url={https://github.com/grantcromwell/programmer-agent-cromwell},
-  version={1.0.0}
+  version={1.0.0},
+  note={Property of MyCromwell.org}
 }
 ```

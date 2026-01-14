@@ -312,11 +312,11 @@ Reproduce performance benchmarks:
 
 ## 11. References
 
-1. Vaswani, A., et al. (2017). "Attention Is All You Need." *NeurIPS*.
-2. Shazeer, N. (2019). "Fast Transformer Decoding: One Write-Head is All You Need." *arXiv*.
-3. Su, J., et al. (2021). "RoFormer: Enhanced Transformer with Rotary Position Embedding." *arXiv*.
-4. Touvron, H., et al. (2023). "LLaMA 2: Open Foundation and Fine-Tuned Chat Models." *arXiv*.
-5. AMD Corporation. (2023). "AMD Zen 3 Microarchitecture Design Guide."
+1. Vaswani, A., et al. (2017). "Attention Is All You Need." *NeurIPS*. [https://arxiv.org/abs/1706.03762](https://arxiv.org/abs/1706.03762)
+2. Shazeer, N. (2019). "Fast Transformer Decoding: One Write-Head is All You Need." *arXiv*. [https://arxiv.org/abs/1911.02150](https://arxiv.org/abs/1911.02150)
+3. Su, J., et al. (2021). "RoFormer: Enhanced Transformer with Rotary Position Embedding." *arXiv*. [https://arxiv.org/abs/2104.09864](https://arxiv.org/abs/2104.09864)
+4. Touvron, H., et al. (2023). "LLaMA 2: Open Foundation and Fine-Tuned Chat Models." *arXiv*. [https://arxiv.org/abs/2307.09288](https://arxiv.org/abs/2307.09288)
+5. AMD Corporation. "AMD Zen 3 Microarchitecture Design Guide." [https://www.amd.com/en/support/tech-docs](https://www.amd.com/en/support/tech-docs)
 
 ---
 
@@ -335,6 +335,6 @@ MIT License - see [LICENSE](https://mycromwell.org/license) for details.
   year={2025},
   url={https://github.com/grantcromwell/programmer-agent-cromwell},
   version={1.0.0},
-  note={Property of MyCromwell.org}
+  note={Property of [MyCromwell.org](https://mycromwell.org)}
 }
 ```

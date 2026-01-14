@@ -1,7 +1,7 @@
-# Cromwell Agent: Model Architecture Specifications
-## Detailed Design for Decoder-Only Transformer with MQA
+# Cromwell VL-JEPA: Model Architecture Specifications
+## Detailed Design for Vision-Language JEPA with Auto-Regressive Generation
 
-**Version**: 1.0
+**Version**: 2.0
 **Date**: 2025-01-14
 
 ---
@@ -9,850 +9,659 @@
 ## 1. Architecture Overview
 
 ```
-Input Token IDs (Long Integer)
-         ↓
-   Embedding Layer
-   (Token Embeddings + RoPE)
-         ↓
-   Transformer Block × 24
-   ┌─────────────────────┐
-   │  1. RMSNorm (input) │
-   │  2. Self-Attention  │
-   │     (MQA + RoPE)    │
-   │  3. Residual +1     │
-   │  4. RMSNorm (post)  │
-   │  5. MLP (SwiGLU)    │
-   │  6. Residual +2     │
-   └─────────────────────┘
-         ↓
-   Final RMSNorm
-         ↓
-   Output Projection
-   (to vocabulary logits)
-         ↓
-   Softmax / Sampling
+┌─────────────────────────────────────────────────────────────────────┐
+│                      MULTIMODAL INPUT                              │
+├─────────────────────────────┬───────────────────────────────────────┤
+│       Vision Input          │          Language Input               │
+│    [H, W, 3] RGB Image      │      Token IDs [seq_len]             │
+└──────────────┬──────────────┴──────────────┬────────────────────────┘
+               │                             │
+               ▼                             ▼
+┌──────────────────────────┐    ┌──────────────────────────┐
+│   Vision Encoder         │    │   Language Encoder       │
+│   (~50M params)          │    │   (~120M params)         │
+│  - CNN Stem              │    │  - Token Embedding       │
+│  - MBConv Blocks (×4)    │    │  - RoPE Positional       │
+│  - ViT Blocks (×6)       │    │  - Transformer (×12)     │
+│  - Output: [N_v, 384]    │    │  - Output: [N_l, 768]    │
+└──────────────┬───────────┘    └──────────────┬───────────┘
+               │                             │
+               └──────────────┬──────────────┘
+                              ▼
+              ┌──────────────────────────────┐
+              │   Cross-Modal Fusion         │
+              │   (~40M params)              │
+              │  - Projection to 512-dim     │
+              │  - Cross-Attention (×6)      │
+              │  - Output: [N_v+N_l, 512]    │
+              └──────────────┬───────────────┘
+                             │
+              ┌──────────────┴───────────────┐
+              ▼                              ▼
+┌──────────────────────────┐    ┌──────────────────────────┐
+│   JEPA Prediction Head   │    │   Auto-Regressive Head   │
+│   (~30M params)          │    │   (~60M params)          │
+│  - Context Encoder (×4)  │    │  - Projection to 768     │
+│  - Multi-Step Predictor  │    │  - AR Transformer (×6)   │
+│  - Loss: MSE embedding   │    │  - LM Head to vocab      │
+└──────────────────────────┘    └──────────────┬───────────┘
+                                            │
+                                            ▼
+                                    Output Tokens
+                                  (Generated Code/Text)
 ```
 
 ---
 
-## 2. Component Specifications
+## 2. Vision Encoder (~50M Parameters)
 
-### 2.1 Embedding Layer
+### 2.1 Architecture
 
-**Purpose**: Convert token IDs to continuous representations
+```
+Input: RGB Image [H, W, 3]
+         ↓
+┌─────────────────────────────────────┐
+│  Stem Layer: Patch Embedding        │
+│  - Conv: 4×4, stride=4              │
+│  - Channels: 3 → 96                 │
+│  - Output: [H/4, W/4, 96]          │
+│  - Params: 4×4×3×96 = 4,608        │
+└──────────────┬──────────────────────┘
+               ▼
+┌─────────────────────────────────────┐
+│  MBConv Blocks (×4)                 │
+│  - Depthwise Separable Conv         │
+│  - Expansion ratio: 6               │
+│  - SE Attention                     │
+│  - Output: [H/8, W/8, 192]         │
+│  - Params: ~20M total              │
+└──────────────┬──────────────────────┘
+               ▼
+┌─────────────────────────────────────┐
+│  Projection Layer                   │
+│  - Conv: 1×1, stride=1              │
+│  - Channels: 192 → 384              │
+│  - Output: [H/8, W/8, 384]         │
+│  - Params: 192×384 = 73,728        │
+└──────────────┬──────────────────────┘
+               ▼
+┌─────────────────────────────────────┐
+│  Vision Transformer Blocks (×6)     │
+│  - Windowed Attention (16×16)       │
+│  - Hidden dim: 384                  │
+│  - Heads: 6                         │
+│  - MLP: 384 → 1536 → 384           │
+│  - Params: ~24M total              │
+└──────────────┬──────────────────────┘
+               ▼
+        Flatten + Positional Embeddings
+               ▼
+        Output: [N_vision_patches, 384]
+```
 
-**Specifications**:
+### 2.2 Component Specifications
+
+**MBConv Block (MobileNetV2-style)**:
+
 ```cpp
-class EmbeddingLayer {
-public:
-    // Parameters
-    float* token_embeddings;  // [vocab_size, hidden_size]
-    int vocab_size = 50000;
-    int hidden_size = 2048;
+struct MBConvBlock {
+    // Input: [H, W, C_in]
+    // Output: [H, W, C_out]
 
-    // Forward pass
-    void forward(
-        const int64_t* input_ids,  // [batch_size, seq_len]
-        float* output,             // [batch_size, seq_len, hidden_size]
-        int batch_size,
-        int seq_len
-    );
+    // 1. Expansion (1x1 conv)
+    float* expand_conv;    // [C_in, C_in * 6]
+    float* expand_bn;      // [C_in * 6]
+    float* expand_bias;    // [C_in * 6]
 
-    // Memory layout: row-major for cache efficiency
-    // token_embeddings[token_id] gives hidden_dim vector
-    // Aligned to 32 bytes for AVX2
+    // 2. Depthwise (3x3 conv)
+    float* depthwise_conv; // [3, 3, C_in * 6, C_in * 6] (groups=C_in*6)
+    float* depthwise_bn;   // [C_in * 6]
+    float* depthwise_bias; // [C_in * 6]
+
+    // 3. Squeeze-Excitation
+    float* se_fc1;         // [C_in * 6, C_in * 6 / 4]
+    float* se_fc2;         // [C_in * 6 / 4, C_in * 6]
+
+    // 4. Projection (1x1 conv)
+    float* project_conv;   // [C_in * 6, C_out]
+    float* project_bn;     // [C_out]
+    float* project_bias;   // [C_out]
+
+    // Activation: Swish (SiLU)
+    // Residual connection if C_in == C_out
 };
 ```
 
-**Memory Layout**:
-- Shape: `[vocab_size, hidden_size]`
-- Order: Row-major (token ID fastest changing)
-- Alignment: 32 bytes (AVX2 requirement)
-- Size: 50000 × 2048 × 4 bytes = 384 MB
-
-**Optimizations**:
-1. **Pre-fetch embeddings**: For common tokens (top 1000)
-2. **SIMD gather**: Use AVX2 for batch lookup
-3. **Cache alignment**: Align to L1 cache line (64 bytes)
-
-### 2.2 Rotary Positional Embeddings (RoPE)
-
-**Purpose**: Inject position information into queries and keys
-
-**Mathematical Formulation**:
-
-```python
-# For a position m and dimension d (head_dim / 2)
-theta_m_i = m / (base^(2i/d))
-
-# Rotation matrix for 2D subspaces
-R(m, theta) = [
-    [cos(theta_m_i), -sin(theta_m_i)],
-    [sin(theta_m_i),  cos(theta_m_i)]
-]
-
-# Apply to query/key pairs
-q_rotated = R @ q
-k_rotated = R @ k
-```
-
-**Implementation**:
+**Vision Transformer Block**:
 
 ```cpp
-struct RoPEConfig {
-    int head_dim = 64;           // Must be even for pairing
-    float base = 10000.0f;       // Rotary base
-    int max_position = 4096;     // Maximum sequence length
-};
+struct ViTBlock {
+    // Windowed Multi-Head Self-Attention
+    float* qkv_proj;       // [384, 384*3]  // Q, K, V projection
+    float* o_proj;         // [384, 384]    // Output projection
+    float* attn_norm;      // [384]         // RMSNorm
 
-class RotaryEmbeddings {
-public:
-    // Pre-computed frequencies
-    float* freqs;  // [max_position, head_dim / 2]
-    float* inv_freqs;  // [head_dim / 2]
+    // SwiGLU MLP
+    float* gate_up_proj;   // [1536, 384*2]  // Gate and Up fused
+    float* down_proj;      // [384, 1536]    // Down projection
+    float* mlp_norm;       // [384]         // RMSNorm
 
-    void initialize(const RoPEConfig& config);
+    // Window size for attention
+    int window_size = 16;
 
-    // Apply rotary embeddings in-place
-    void apply(
-        float* q,  // [seq_len, num_heads, head_dim]
-        float* k,  // [seq_len, num_kv_heads, head_dim]
-        int seq_len,
-        int num_heads,
-        int num_kv_heads,
-        int head_dim
-    );
-
-private:
-    // SIMD-optimized rotation for single 2D subspace
-    inline void rotate_2d(
-        float& x,
-        float& y,
-        float cos_theta,
-        float sin_theta
-    ) {
-        // Rotation: [x', y'] = [x*cos - y*sin, x*sin + y*cos]
-        float x_new = x * cos_theta - y * sin_theta;
-        float y_new = x * sin_theta + y * cos_theta;
-        x = x_new;
-        y = y_new;
-    }
+    // Attention heads: 6
+    int num_heads = 6;
+    int head_dim = 64;  // 384 / 6
 };
 ```
 
-**Memory Layout**:
-- `freqs`: `[max_position, head_dim / 2]` (float32)
-- Size: 4096 × 32 × 4 bytes = 512 KB (fits in L2 cache)
+### 2.3 Parameter Count
 
-**Optimizations**:
-1. **Pre-compute frequencies**: Compute once at initialization
-2. **SIMD rotation**: Process 4 pairs per AVX2 instruction
-3. **Interleave Q/K processing**: Better cache utilization
+| Component | Parameters |
+|-----------|------------|
+| Stem (Conv 4×4) | 4,608 |
+| MBConv Blocks (×4) | ~20,000,000 |
+| Projection (192 → 384) | 73,728 |
+| ViT Blocks (×6) | ~24,000,000 |
+| Positional Embeddings | ~6,144 |
+| **Total** | **~50,000,000** |
 
-### 2.3 Multi-Query Attention (MQA)
-
-**Purpose**: Efficient attention with shared key/value projections
-
-**Architecture**:
-
-```
-Input: [batch_size, seq_len, hidden_size]
-         ↓
-    QKV Projection
-         ↓
-    ┌─────────────────────────────────────────┐
-    │ Q: [seq_len, num_heads, head_dim]       │
-    │    32 query heads (independent)          │
-    │                                          │
-    │ K: [seq_len, num_kv_heads, head_dim]    │
-    │    4 key-value heads (shared)            │
-    │                                          │
-    │ V: [seq_len, num_kv_heads, head_dim]    │
-    │    4 key-value heads (shared)            │
-    └─────────────────────────────────────────┘
-         ↓
-    Apply RoPE to Q and K
-         ↓
-    QK^T (Attention Scores)
-         ↓
-    Causal Mask + Softmax
-         ↓
-    Attention Weights @ V
-         ↓
-    Output Projection
-         ↓
-    [seq_len, hidden_size]
-```
-
-**Implementation**:
+### 2.4 Memory Layout
 
 ```cpp
-struct MultiQueryAttentionConfig {
-    int hidden_size = 2048;
-    int num_heads = 32;          // Query heads
-    int num_kv_heads = 4;        // Key/Value heads (8:1 ratio)
-    int head_dim = 64;           // hidden_size / num_heads
-    float attention_dropout = 0.0f;
-    bool use_cache = true;
-};
-
-class MultiQueryAttention {
-public:
-    // Parameters
-    float* qkv_proj;      // [hidden_size, hidden_size + 2 * (hidden_size / num_heads * num_kv_heads)]
-    float* o_proj;        // [hidden_size, hidden_size]
-
-    // KV cache for inference
-    KVCache* cache;
-
-    void forward(
-        const float* input,       // [seq_len, hidden_size]
-        float* output,            // [seq_len, hidden_size]
-        int seq_len,
-        bool use_causal_mask = true
-    );
-
-private:
-    // Compute QK^T attention scores
-    void compute_qk_attn(
-        const float* q,  // [seq_len, num_heads, head_dim]
-        const float* k,  // [cache_len, num_kv_heads, head_dim]
-        float* attn,     // [seq_len, num_heads, cache_len]
-        int seq_len,
-        int cache_len
-    );
-
-    // Apply causal mask
-    void apply_causal_mask(
-        float* attn,  // [seq_len, num_heads, cache_len]
-        int seq_len,
-        int cache_len
-    );
-
-    // Compute softmax with numerical stability
-    void softmax_inplace(
-        float* input,  // [rows, cols]
-        int rows,
-        int cols
-    );
-
-    // Compute attention output: weights @ V
-    void compute_attn_output(
-        const float* attn,  // [seq_len, num_heads, cache_len]
-        const float* v,     // [cache_len, num_kv_heads, head_dim]
-        float* output,      // [seq_len, num_heads, head_dim]
-        int seq_len,
-        int cache_len
-    );
-};
-```
-
-**KV Cache Design**:
-
-```cpp
-class KVCache {
-public:
-    KVCache(int max_batch_size, int max_seq_len, int num_layers, int num_kv_heads, int head_dim);
-
-    // Update cache with new keys and values
-    void update(
-        int layer_idx,
-        const float* k,  // [seq_len, num_kv_heads, head_dim]
-        const float* v,  // [seq_len, num_kv_heads, head_dim]
-        int seq_len,
-        int* new_cache_len  // Output: updated cache length
-    );
-
-    // Retrieve cached keys and values
-    void get(
-        int layer_idx,
-        float** k,  // Output: [cache_len, num_kv_heads, head_dim]
-        float** v,  // Output: [cache_len, num_kv_heads, head_dim]
-        int& cache_len  // Output: current cache length
-    );
-
-    // Clear cache (for new sequence)
-    void clear();
-
-    // Memory usage per layer: max_seq_len * num_kv_heads * head_dim * 2 * 4 bytes
-    // For 4096 cache, 4 heads, 64 dim: 4096 * 4 * 64 * 8 = 8 MB per layer
-    // Total for 24 layers: ~192 MB
-
-private:
-    std::vector<float*> k_cache_;  // Per-layer key cache
-    std::vector<float*> v_cache_;  // Per-layer value cache
-    std::vector<int> cache_lengths_;  // Per-layer current length
-
-    int max_batch_size_;
-    int max_seq_len_;
-    int num_layers_;
-    int num_kv_heads_;
-    int head_dim_;
-};
-```
-
-**Memory Layout**:
-
-```
-QKV Projection:
-- Shape: [hidden_size, qkv_total_dim]
-- qkv_total_dim = hidden_size (Q) + 2 * (num_kv_heads * head_dim) (K, V)
-- For our config: [2048, 2048 + 2 * (4 * 64)] = [2048, 2560]
-- Size: 2048 × 2560 × 4 bytes = 20 MB
-
-Output Projection:
-- Shape: [hidden_size, hidden_size]
-- Size: 2048 × 2048 × 4 bytes = 16 MB
-
-KV Cache (inference):
-- Per layer: max_seq_len × num_kv_heads × head_dim × 2 (K, V) × 4 bytes
-- 4096 × 4 × 64 × 8 = 8 MB per layer
-- Total (24 layers): ~192 MB
-```
-
-### 2.4 RMSNorm
-
-**Purpose**: Normalize hidden states for stable training
-
-**Mathematical Formulation**:
-
-```python
-RMSNorm(x) = x / sqrt(mean(x^2) + epsilon) * scale
-
-where:
-- mean(x^2) = sum(x^2) / hidden_size
-- epsilon = 1e-6 (for numerical stability)
-- scale: learned parameter (initialized to 1.0)
-```
-
-**Implementation**:
-
-```cpp
-class RMSNorm {
-public:
-    // Parameters
-    float* scale;  // [hidden_size]
-    int hidden_size;
-    float epsilon = 1e-6f;
-
-    void forward(
-        const float* input,  // [batch_size, seq_len, hidden_size]
-        float* output,       // [batch_size, seq_len, hidden_size]
-        int batch_size,
-        int seq_len
-    );
-
-private:
-    // SIMD-optimized normalization for single vector
-    void normalize_vector(
-        const float* input,  // [hidden_size]
-        float* output,       // [hidden_size]
-        const float* scale   // [hidden_size]
-    );
-};
-```
-
-**AVX2 Optimization**:
-
-```cpp
-void RMSNorm::normalize_vector(
-    const float* input,
-    float* output,
-    const float* scale
-) {
-    // Compute sum of squares
-    __m256 sum_sq = _mm256_setzero_ps();
-
-    int i = 0;
-    for (; i <= hidden_size - 8; i += 8) {
-        __m256 x = _mm256_load_ps(&input[i]);
-        sum_sq = _mm256_fmadd_ps(x, x, sum_sq);  // sum_sq += x * x
-    }
-
-    // Horizontal sum
-    float sum_array[8];
-    _mm256_storeu_ps(sum_array, sum_sq);
-    float mean_sq = 0.0f;
-    for (int j = 0; j < 8; j++) {
-        mean_sq += sum_array[j];
-    }
-
-    // Handle remaining elements
-    for (; i < hidden_size; i++) {
-        mean_sq += input[i] * input[i];
-    }
-    mean_sq /= static_cast<float>(hidden_size);
-
-    // Compute normalization factor
-    float norm_factor = 1.0f / sqrt(mean_sq + epsilon);
-
-    // Apply normalization with scale
-    __m256 norm_vec = _mm256_set1_ps(norm_factor);
-
-    i = 0;
-    for (; i <= hidden_size - 8; i += 8) {
-        __m256 x = _mm256_load_ps(&input[i]);
-        __m256 s = _mm256_load_ps(&scale[i]);
-        __m256 normalized = _mm256_mul_ps(x, norm_vec);
-        _mm256_store_ps(&output[i], _mm256_mul_ps(normalized, s));
-    }
-
-    // Handle remaining elements
-    for (; i < hidden_size; i++) {
-        output[i] = (input[i] * norm_factor) * scale[i];
-    }
-}
-```
-
-**Memory Layout**:
-- Shape: `[hidden_size]`
-- Size: 2048 × 4 bytes = 8 KB per layer
-- Total (24 layers × 2 norms): ~384 KB
-
-### 2.5 MLP with SwiGLU
-
-**Purpose**: Non-linear transformation for expressiveness
-
-**Architecture**:
-
-```
-Input: [seq_len, hidden_size]
-         ↓
-    Gate Projection: X @ W_gate
-         ↓
-    Up Projection: X @ W_up
-         ↓
-    Element-wise: Swish(Gate) ⊗ Up
-         ↓
-    Down Projection: (Swish(Gate) ⊗ Up) @ W_down
-         ↓
-Output: [seq_len, hidden_size]
-
-Swish(x) = x * sigmoid(x)
-```
-
-**Implementation**:
-
-```cpp
-class SwiGLUMLP {
-public:
-    // Parameters
-    float* gate_up_proj;  // [2 * intermediate_size, hidden_size] (fused)
-    float* down_proj;     // [hidden_size, intermediate_size]
-
-    int hidden_size = 2048;
-    int intermediate_size = 5632;  // 2.75 * hidden_size
-
-    void forward(
-        const float* input,  // [seq_len, hidden_size]
-        float* output,       // [seq_len, hidden_size]
-        int seq_len
-    );
-
-private:
-    // Swish activation: x * sigmoid(x)
-    inline float swish(float x) {
-        return x * (1.0f / (1.0f + exp(-x)));
-    }
-};
-```
-
-**Memory Layout**:
-
-```
-Gate/Up Projection (fused):
-- Shape: [2 * intermediate_size, hidden_size]
-- Size: 2 × 5632 × 2048 × 4 bytes = 90 MB
-
-Down Projection:
-- Shape: [hidden_size, intermediate_size]
-- Size: 2048 × 5632 × 4 bytes = 45 MB
-
-Total MLP parameters: ~135 MB per layer
-Total for 24 layers: ~3.2 GB
-```
-
-**AVX2 Optimization**:
-
-```cpp
-void SwiGLUMLP::forward(
-    const float* input,
-    float* output,
-    int seq_len
-) {
-    // Temporary buffer for intermediate activations
-    std::vector<float> gate_up_buf(2 * intermediate_size);
-    std::vector<float> activated_buf(intermediate_size);
-
-    for (int t = 0; t < seq_len; t++) {
-        const float* x = &input[t * hidden_size];
-
-        // Compute gate and up projections (fused)
-        // gate_up_proj is [2 * intermediate_size, hidden_size]
-        // We compute: gate = x @ W_gate, up = x @ W_up
-        // These are fused in the projection matrix
-
-        for (int i = 0; i < 2 * intermediate_size; i += 8) {
-            // Load 8 weights (for 8 outputs)
-            __m256 sum = _mm256_setzero_ps();
-
-            for (int j = 0; j < hidden_size; j += 8) {
-                __m256 x_vec = _mm256_loadu_ps(&x[j]);
-                __m256 w_vec = _mm256_loadu_ps(&gate_up_proj[i * hidden_size + j]);
-
-                // FMA: sum += x * w
-                sum = _mm256_fmadd_ps(x_vec, w_vec, sum);
-            }
-
-            // Horizontal sum
-            float sum_array[8];
-            _mm256_storeu_ps(sum_array, sum);
-
-            for (int k = 0; k < 8; k++) {
-                gate_up_buf[i + k] = sum_array[k];
-            }
-        }
-
-        // Split into gate and up, apply Swish to gate, then element-wise multiply
-        for (int i = 0; i < intermediate_size; i += 8) {
-            __m256 gate = _mm256_load_ps(&gate_up_buf[i]);
-            __m256 up = _mm256_load_ps(&gate_up_buf[intermediate_size + i]);
-
-            // Swish(gate) = gate * sigmoid(gate)
-            __m256 sigmoid_gate = compute_sigmoid_avx2(gate);
-            __m256 activated = _mm256_mul_ps(gate, sigmoid_gate);
-
-            // Element-wise multiply: Swish(gate) * up
-            __m256 result = _mm256_mul_ps(activated, up);
-            _mm256_store_ps(&activated_buf[i], result);
-        }
-
-        // Down projection
-        for (int i = 0; i < hidden_size; i += 8) {
-            __m256 sum = _mm256_setzero_ps();
-
-            for (int j = 0; j < intermediate_size; j += 8) {
-                __m256 act_vec = _mm256_load_ps(&activated_buf[j]);
-                __m256 w_vec = _mm256_loadu_ps(&down_proj[i * intermediate_size + j]);
-
-                sum = _mm256_fmadd_ps(act_vec, w_vec, sum);
-            }
-
-            float sum_array[8];
-            _mm256_storeu_ps(sum_array, sum);
-
-            for (int k = 0; k < 8; k++) {
-                output[t * hidden_size + i + k] = sum_array[k];
-            }
-        }
-    }
-}
-```
-
-### 2.6 Transformer Block
-
-**Purpose**: Combine attention and MLP with residual connections
-
-**Architecture**:
-
-```
-Input: [seq_len, hidden_size]
-         ↓
-    1. RMSNorm(input)
-         ↓
-    2. Self-Attention
-         ↓
-    3. Residual: input + attention_output
-         ↓
-    4. RMSNorm(attention_output)
-         ↓
-    5. MLP
-         ↓
-    6. Residual: attention_output + mlp_output
-         ↓
-Output: [seq_len, hidden_size]
-```
-
-**Implementation**:
-
-```cpp
-class TransformerBlock {
-public:
-    // Components
-    RMSNorm input_norm;
-    RMSNorm post_attention_norm;
-    MultiQueryAttention attention;
-    SwiGLUMLP mlp;
-
-    int layer_id;
-    int hidden_size;
-
-    void forward(
-        const float* input,  // [seq_len, hidden_size]
-        float* output,       // [seq_len, hidden_size]
-        int seq_len,
-        bool use_cache = true
-    ) {
-        // Allocate temporary buffers
-        std::vector<float> attn_buf(seq_len * hidden_size);
-        std::vector<float> mlp_buf(seq_len * hidden_size);
-
-        // Attention block
-        float* attn_input = attn_buf.data();
-        input_norm.forward(input, attn_input, 1, seq_len);
-        attention.forward(attn_input, attn_buf.data(), seq_len, true);
-
-        // Residual connection
-        for (int i = 0; i < seq_len * hidden_size; i++) {
-            attn_buf[i] += input[i];
-        }
-
-        // MLP block
-        float* mlp_input = mlp_buf.data();
-        post_attention_norm.forward(attn_buf.data(), mlp_input, 1, seq_len);
-        mlp.forward(mlp_input, mlp_buf.data(), seq_len);
-
-        // Residual connection
-        for (int i = 0; i < seq_len * hidden_size; i++) {
-            output[i] = attn_buf[i] + mlp_buf[i];
-        }
-    }
-
-    // Memory usage per layer:
-    // - Input norm: 8 KB
-    // - Attention: 36 MB (projections) + 8 MB (KV cache)
-    // - Post norm: 8 KB
-    // - MLP: 135 MB
-    // Total: ~180 MB per layer
-};
-```
-
-### 2.7 Full Model
-
-**Purpose**: Stack transformer blocks into complete model
-
-**Implementation**:
-
-```cpp
-class CromwellModel {
-public:
-    // Configuration
-    ModelConfig config;
-
-    // Components
-    EmbeddingLayer embeddings;
-    std::vector<TransformerBlock> layers;  // 24 layers
-    RMSNorm final_norm;
-    float* lm_head;  // [vocab_size, hidden_size]
-
-    // KV cache for all layers
-    std::vector<KVCache> kv_caches;
-
-    void forward(
-        const int64_t* input_ids,  // [batch_size, seq_len]
-        float* logits,             // [batch_size, seq_len, vocab_size]
-        int batch_size,
-        int seq_len,
-        bool use_cache = true
-    ) {
-        // Embeddings
-        std::vector<float> hidden(batch_size * seq_len * config.hidden_size);
-        embeddings.forward(input_ids, hidden.data(), batch_size, seq_len);
-
-        // Transformer layers
-        for (int layer_idx = 0; layer_idx < config.num_layers; layer_idx++) {
-            std::vector<float> layer_output(batch_size * seq_len * config.hidden_size);
-
-            layers[layer_idx].forward(
-                hidden.data(),
-                layer_output.data(),
-                seq_len,
-                use_cache
-            );
-
-            hidden = std::move(layer_output);
-        }
-
-        // Final normalization
-        std::vector<float> normalized(batch_size * seq_len * config.hidden_size);
-        final_norm.forward(hidden.data(), normalized.data(), batch_size, seq_len);
-
-        // LM head projection
-        // Compute: normalized @ lm_head^T
-        // Output: [batch_size, seq_len, vocab_size]
-        for (int b = 0; b < batch_size; b++) {
-            for (int t = 0; t < seq_len; t++) {
-                const float* h = &normalized[(b * seq_len + t) * config.hidden_size];
-                float* logits_bt = &logits[(b * seq_len + t) * config.vocab_size];
-
-                // Matrix-vector multiplication
-                for (int v = 0; v < config.vocab_size; v += 8) {
-                    __m256 sum = _mm256_setzero_ps();
-
-                    for (int i = 0; i < config.hidden_size; i += 8) {
-                        __m256 h_vec = _mm256_loadu_ps(&h[i]);
-                        __m256 w_vec = _mm256_loadu_ps(&lm_head[v * config.hidden_size + i]);
-
-                        sum = _mm256_fmadd_ps(h_vec, w_vec, sum);
-                    }
-
-                    float sum_array[8];
-                    _mm256_storeu_ps(sum_array, sum);
-
-                    for (int k = 0; k < 8; k++) {
-                        logits_bt[v + k] = sum_array[k];
-                    }
-                }
-            }
-        }
-    }
-
-    // Memory usage summary:
-    // - Embeddings: 384 MB
-    // - 24 Transformer layers: ~4.3 GB (180 MB each)
-    // - Final norm: 8 KB
-    // - LM head: 384 MB
-    // - KV cache: 192 MB (inference only)
-    // Total: ~5.3 GB (training), ~5.5 GB (inference)
+// Vision encoder weights (NHWC for AVX2)
+struct VisionEncoderWeights {
+    // Stem
+    float* stem_conv;       // [4, 4, 3, 96] (NHWC)
+    float* stem_bn;         // [96]
+
+    // MBConv blocks (×4)
+    float* mbconv_expand[4];      // [1, 1, C_in, C_in*6]
+    float* mbconv_depthwise[4];   // [3, 3, C_in*6, C_in*6]
+    float* mbconv_se_fc1[4];      // [C_in*6, C_in*6/4]
+    float* mbconv_se_fc2[4];      // [C_in*6/4, C_in*6]
+    float* mbconv_project[4];     // [1, 1, C_in*6, C_out]
+
+    // Projection
+    float* proj_conv;       // [1, 1, 192, 384]
+
+    // ViT blocks (×6)
+    float* vit_qkv[6];      // [384, 1152]
+    float* vit_o[6];        // [384, 384]
+    float* vit_gate_up[6];  // [1536, 768] (SwiGLU fused)
+    float* vit_down[6];     // [384, 1536]
+    float* vit_norm1[6];    // [384]
+    float* vit_norm2[6];    // [384]
+
+    // Positional embeddings
+    float* pos_embed;       // [num_patches, 384]
+
+    // All aligned to 32 bytes for AVX2
 };
 ```
 
 ---
 
-## 3. Parameter Count Summary
+## 3. Language Encoder (~120M Parameters)
 
-| Component | Shape | Parameters | Memory |
-|-----------|-------|------------|--------|
-| **Embeddings** | [50000, 2048] | 102.4M | 384 MB |
-| **Per Layer** | | | |
-| - Input norm | [2048] | 2,048 | 8 KB |
-| - QKV projection | [2048, 2560] | 5.2M | 20 MB |
-| - Output projection | [2048, 2048] | 4.2M | 16 MB |
-| - Post norm | [2048] | 2,048 | 8 KB |
-| - Gate/Up proj | [11264, 2048] | 23.1M | 90 MB |
-| - Down proj | [2048, 5632] | 11.5M | 45 MB |
-| **Total per layer** | | 44.0M | 171 MB |
-| **24 layers** | | 1,056.0M | 4.1 GB |
-| **Final norm** | [2048] | 2,048 | 8 KB |
-| **LM head** | [50000, 2048] | 102.4M | 384 MB |
-| **TOTAL** | | **1,260.8M** | **4.9 GB** |
-
-**Note**: ~1.26B parameters, close to target of 1.2B
-
----
-
-## 4. Forward Pass Computation
-
-### 4.1 FLOPs Analysis
-
-**Per token (excluding embeddings):**
+### 3.1 Architecture
 
 ```
-For each layer (24 total):
-1. Attention:
-   - QKV projection: 3 * hidden_size^2 = 3 * 2048^2 = 12.6M FLOPs
-   - QK^T: seq_len * hidden_size * cache_len (worst case: 4096 * 2048 * 4096) = 34.4B FLOPs
-   - Softmax: O(seq_len * cache_len)
-   - Attention @ V: seq_len * cache_len * hidden_size = 34.4B FLOPs
-   - Output projection: hidden_size^2 = 4.2M FLOPs
-
-2. MLP:
-   - Gate/Up: 2 * hidden_size * intermediate_size = 2 * 2048 * 5632 = 23.1M FLOPs
-   - Down: hidden_size * intermediate_size = 11.5M FLOPs
-
-Total per token: ~69B FLOPs (worst case with full context)
+Input: Token IDs [seq_len]
+         ↓
+┌─────────────────────────────────────┐
+│  Token Embedding Layer              │
+│  - Vocab size: 50,000               │
+│  - Hidden dim: 768                  │
+│  - Output: [seq_len, 768]          │
+│  - Params: 50,000 × 768 = 38.4M   │
+└──────────────┬──────────────────────┘
+               ▼
+┌─────────────────────────────────────┐
+│  Rotary Positional Encoding (RoPE)  │
+│  - Applied to Q and K               │
+│  - No learned parameters            │
+└──────────────┬──────────────────────┘
+               ▼
+┌─────────────────────────────────────┐
+│  Transformer Layers (×12)           │
+│  For each layer:                    │
+│  ┌──────────────────────────────┐  │
+│  │ 1. RMSNorm (pre-attention)  │  │
+│  │ 2. Multi-Query Attention    │  │
+│  │    - 12 Q heads, 3 KV heads  │  │
+│  │    - Head dim: 64            │  │
+│  │ 3. Residual +1               │  │
+│  │ 4. RMSNorm (pre-MLP)         │  │
+│  │ 5. SwiGLU MLP                │  │
+│  │    - 768 → 3072 → 768        │  │
+│  │ 6. Residual +2               │  │
+│  └──────────────────────────────┘  │
+│  - Params per layer: ~6.5M       │
+│  - Total: 12 × 6.5M = 78M        │
+└──────────────┬──────────────────────┘
+               ▼
+        Output: [seq_len, 768]
 ```
 
-**Optimization**: MQA reduces KV cache memory bandwidth by 8x
+### 3.2 Component Specifications
 
-### 4.2 Memory Bandwidth Analysis
-
-**Per token generation:**
-
-```
-Memory reads:
-- Layer weights: 180 MB (must read for each layer)
-- KV cache: 8 MB * 24 = 192 MB (accessed during attention)
-- Activations: ~50 MB (forward pass buffers)
-
-Total reads per token: ~422 MB
-
-At 50 GB/s memory bandwidth (DDR4-3200):
-Theoretical max: 50000 MB/s / 422 MB ≈ 118 tokens/second
-
-Realistic (70% efficiency): ~80 tokens/second
-
-With overhead (Python, batching): Target 50 tokens/second is achievable
-```
-
----
-
-## 5. Initialization Strategy
-
-### 5.1 Weight Initialization
+**Transformer Layer**:
 
 ```cpp
-void initialize_weights(CromwellModel* model, float scale = 0.02f) {
-    // Embeddings: Normal(0, 0.02)
-    for (int i = 0; i < model->config.vocab_size * model->config.hidden_size; i++) {
-        model->embeddings.token_embeddings[i] = random_normal() * scale;
-    }
+struct TransformerLayer {
+    // Multi-Query Attention
+    // Query: 12 heads, Key/Value: 3 heads (shared)
+    float* qkv_proj;       // [768, 768 + 2*192] = [768, 1152]
+                           // Q: 768×768, K: 768×192, V: 768×192
+    float* o_proj;         // [768, 768]
+    float* attn_norm;      // [768]  // RMSNorm
 
-    // Transformer layers
-    for (auto& layer : model->layers) {
-        // QKV projection: Kaiming initialization
-        initialize_kaiming_uniform(
-            layer.attention.qkv_proj,
-            model->config.hidden_size,
-            model->config.hidden_size + 2 * (model->config.num_kv_heads * model->config.head_dim)
-        );
+    // SwiGLU MLP
+    float* gate_up_proj;   // [3072, 768*2] = [3072, 1536] (fused)
+    float* down_proj;      // [768, 3072]
+    float* mlp_norm;       // [768]  // RMSNorm
 
-        // Output projection: Xavier initialization (gain = 1 / sqrt(2) for GELU)
-        initialize_xavier_uniform(
-            layer.attention.o_proj,
-            model->config.hidden_size,
-            model->config.hidden_size
-        );
+    // Attention heads: 12 query, 3 key-value
+    int num_q_heads = 12;
+    int num_kv_heads = 3;
+    int head_dim = 64;  // 768 / 12
+};
+```
 
-        // Normalization: Initialize scale to 1.0
-        std::fill(layer.input_norm.scale, layer.input_norm.scale + model->config.hidden_size, 1.0f);
-        std::fill(layer.post_attention_norm.scale, layer.post_attention_norm.scale + model->config.hidden_size, 1.0f);
+### 3.3 Parameter Count
 
-        // MLP: Kaiming initialization
-        initialize_kaiming_uniform(layer.mlp.gate_up_proj, model->config.intermediate_size, model->config.hidden_size);
-        initialize_kaiming_uniform(layer.mlp.down_proj, model->config.hidden_size, model->config.intermediate_size);
-    }
+| Component | Parameters |
+|-----------|------------|
+| Token Embeddings | 38,400,000 |
+| Per Transformer Layer (×12) | 6,500,000 |
+| - QKV Projection | 884,736 |
+| - Output Projection | 589,824 |
+| - SwiGLU MLP | 4,718,592 |
+| - Norm scales | 1,536 |
+| **Total** | **~116,400,000** → rounds to **120M** |
 
-    // LM head: Tie with embeddings (share weights)
-    std::copy(
-        model->embeddings.token_embeddings,
-        model->embeddings.token_embeddings + model->config.vocab_size * model->config.hidden_size,
-        model->lm_head
+---
+
+## 4. Cross-Modal Fusion (~40M Parameters)
+
+### 4.1 Architecture
+
+```
+Inputs:
+  - Vision: [N_v, 384]
+  - Language: [N_l, 768]
+         ↓
+┌─────────────────────────────────────┐
+│  Projection to Common Dimension     │
+│  - Vision: Linear(384 → 512)        │
+│  - Language: Linear(768 → 512)      │
+│  - Params: 384×512 + 768×512 = 590K│
+└──────────────┬──────────────────────┘
+               ▼
+┌─────────────────────────────────────┐
+│  Cross-Modal Attention Blocks (×6)  │
+│  For each block:                    │
+│  ┌──────────────────────────────┐  │
+│  │ V→L Cross-Attention          │  │
+│  │  - Q_vision, K_lang, V_lang  │  │
+│  │  - Output: [N_l, 512]        │  │
+│  │ L→V Cross-Attention          │  │
+│  │  - Q_lang, K_vision, V_vision│  │
+│  │  - Output: [N_v, 512]        │  │
+│  │ Concat + Residual             │  │
+│  │ SwiGLU MLP (512 → 2048 → 512)│  │
+│  └──────────────────────────────┘  │
+│  - Params per block: ~6M         │
+│  - Total: 6 × 6M = 36M           │
+└──────────────┬──────────────────────┘
+               ▼
+        Output: [N_v + N_l, 512] joint embeddings
+```
+
+### 4.2 Component Specifications
+
+**Cross-Attention Block**:
+
+```cpp
+struct CrossAttentionBlock {
+    // Vision to Language
+    float* v_to_l_q;       // [512, 512]  // Vision queries
+    float* v_to_l_kv;      // [512, 1024] // Language K, V (concatenated)
+    float* v_to_l_o;       // [512, 512]
+
+    // Language to Vision
+    float* l_to_v_q;       // [512, 512]  // Language queries
+    float* l_to_v_kv;      // [512, 1024] // Vision K, V
+    float* l_to_v_o;       // [512, 512]
+
+    // SwiGLU MLP
+    float* gate_up_proj;   // [2048, 1024] (fused)
+    float* down_proj;      // [512, 2048]
+
+    // Normalization
+    float* norm1;          // [512]  // Pre-V→L attention
+    float* norm2;          // [512]  // Pre-L→V attention
+    float* norm3;          // [512]  // Pre-MLP
+
+    // Attention heads
+    int num_heads = 8;
+    int head_dim = 64;  // 512 / 8
+};
+```
+
+### 4.3 Parameter Count
+
+| Component | Parameters |
+|-----------|------------|
+| Vision Projection (384 → 512) | 196,608 |
+| Language Projection (768 → 512) | 393,216 |
+| Per Cross-Attention Block (×6) | ~6,000,000 |
+| - V→L Attention | ~1,570,000 |
+| - L→V Attention | ~1,570,000 |
+| - SwiGLU MLP | ~2,620,000 |
+| - Norm scales | 1,536 |
+| **Total** | **~36,000,000** → rounds to **40M** |
+
+---
+
+## 5. JEPA Prediction Head (~30M Parameters)
+
+### 5.1 Architecture
+
+```
+Input: Joint embeddings [N, 512]
+         ↓
+┌─────────────────────────────────────┐
+│  Temporal Context Encoder (×4)      │
+│  For each layer:                    │
+│  ┌──────────────────────────────┐  │
+│  │ 1. RMSNorm (pre-attention)  │  │
+│  │ 2. Multi-Head Self-Attention │  │
+│  │    - 8 heads, head_dim=64    │  │
+│  │ 3. Residual +1               │  │
+│  │ 4. RMSNorm (pre-MLP)         │  │
+│  │ 5. SwiGLU MLP                │  │
+│  │    - 512 → 2048 → 512        │  │
+│  │ 6. Residual +2               │  │
+│  └──────────────────────────────┘  │
+│  - Params per layer: ~5M         │
+│  - Total: 4 × 5M = 20M           │
+└──────────────┬──────────────────────┘
+               ▼
+┌─────────────────────────────────────┐
+│  Multi-Step Predictor               │
+│  - Predict z_{t+1}: MLP(512→512)   │
+│  - Predict z_{t+2}: MLP(512→512)   │
+│  - Predict z_{t+3}: MLP(512→512)   │
+│  - Shared weights across steps     │
+│  - Params: ~5M                     │
+└──────────────┬──────────────────────┘
+               ▼
+┌─────────────────────────────────────┐
+│  Embedding Consistency Loss         │
+│  - MSE(predicted, target)          │
+│  - In embedding space (not tokens) │
+└─────────────────────────────────────┘
+```
+
+### 5.2 JEPA Prediction Algorithm
+
+```cpp
+struct JEPAPredictor {
+    // Context encoder (4 transformer layers)
+    float* context_qkv[4];     // [512, 1536]
+    float* context_o[4];       // [512, 512]
+    float* context_gate_up[4]; // [2048, 1024]
+    float* context_down[4];    // [512, 2048]
+
+    // Multi-step predictor (shared across steps)
+    float* predictor_w1;       // [512, 512]  // Step 1
+    float* predictor_w2;       // [512, 512]  // Step 2
+    float* predictor_w3;       // [512, 512]  // Step 3
+
+    // Normalization
+    float* norm[4];            // [512] per layer
+
+    // Prediction
+    void predict(
+        const float* context_emb,  // [N, 512]
+        float* predicted_emb,      // [N, 3, 512] output
+        int N
     );
+};
+
+// JEPA loss computation
+float jepa_loss(
+    const float* predicted,  // [N, 3, 512]
+    const float* target,     // [N, 3, 512]
+    int N,
+    float step_weights[3]    // [1.0, 0.8, 0.6]
+);
+```
+
+### 5.3 Parameter Count
+
+| Component | Parameters |
+|-----------|------------|
+| Context Encoder (4 layers) | 20,000,000 |
+| Multi-Step Predictor | 5,000,000 |
+| Embedding Consistency Heads | 5,000,000 |
+| **Total** | **~30,000,000** |
+
+---
+
+## 6. Auto-Regressive Head (~60M Parameters)
+
+### 6.1 Architecture
+
+```
+Input: Joint embeddings [N, 512]
+         ↓
+┌─────────────────────────────────────┐
+│  Projection Layer                   │
+│  - Linear(512 → 768)                │
+│  - Params: 512 × 768 = 393K        │
+└──────────────┬──────────────────────┘
+               ▼
+┌─────────────────────────────────────┐
+│  Auto-Regressive Transformer (×6)  │
+│  For each layer:                    │
+│  ┌──────────────────────────────┐  │
+│  │ 1. RMSNorm (pre-attention)  │  │
+│  │ 2. Causal Self-Attention     │  │
+│  │    - MQA: 12 Q, 3 KV heads   │  │
+│  │    - Causal mask applied     │  │
+│  │ 3. Residual +1               │  │
+│  │ 4. RMSNorm (pre-MLP)         │  │
+│  │ 5. SwiGLU MLP                │  │
+│  │    - 768 → 3072 → 768        │  │
+│  │ 6. Residual +2               │  │
+│  └──────────────────────────────┘  │
+│  - Params per layer: ~6.5M       │
+│  - Total: 6 × 6.5M = 39M         │
+└──────────────┬──────────────────────┘
+               ▼
+┌─────────────────────────────────────┐
+│  Language Model Head                │
+│  - Linear(768 → vocab_size)        │
+│  - Params: 768 × 50,000 = 38.4M   │
+│  - Can tie with input embeddings   │
+└──────────────┬──────────────────────┘
+               ▼
+        Output: Logits [N, vocab_size]
+```
+
+### 6.2 Component Specifications
+
+```cpp
+struct AutoRegressiveHead {
+    // Projection
+    float* proj;           // [768, 512]
+
+    // AR Transformer layers (×6)
+    float* qkv_proj[6];    // [768, 1152]
+    float* o_proj[6];      // [768, 768]
+    float* gate_up_proj[6];// [3072, 1536]
+    float* down_proj[6];   // [768, 3072]
+    float* attn_norm[6];   // [768]
+    float* mlp_norm[6];    // [768]
+
+    // LM head
+    float* lm_head;        // [vocab_size, 768]
+
+    // Causal mask (pre-computed)
+    // bool causal_mask[max_seq_len][max_seq_len];
+
+    // KV cache for fast generation
+    struct KVCache {
+        float* k_cache;     // [max_seq_len, 3, 64]  // 3 KV heads × 64 dim
+        float* v_cache;     // [max_seq_len, 3, 64]
+        int current_len;
+    } kv_cache[6];  // One per layer
+};
+```
+
+### 6.3 Parameter Count
+
+| Component | Parameters |
+|-----------|------------|
+| Projection (512 → 768) | 393,216 |
+| AR Transformer (6 layers) | 39,000,000 |
+| LM Head (768 → 50K) | 38,400,000 |
+| **Total (untied)** | **~78,000,000** |
+
+**Note**: If LM head is tied with input embeddings, subtract 38.4M → **~40M total**
+
+---
+
+## 7. Memory Layout and AVX2 Optimization
+
+### 7.1 Tensor Layout Strategy
+
+**NHWC vs NCHW**:
+- **Attention**: NHWC (batch, seq_len, heads, head_dim)
+- **Vision**: NHWC (batch, height, width, channels)
+- **Dense layers**: Row-major (output_dim, input_dim)
+
+**Rationale**:
+- Sequential access along fastest-changing dimension
+- Cache-friendly for matrix multiplication
+- AVX2-compatible stride (8 floats = 32 bytes)
+
+### 7.2 Alignment Requirements
+
+```cpp
+// All memory allocations aligned to 32 bytes
+constexpr int kAVX2Alignment = 32;
+
+// Aligned allocation
+inline float* aligned_alloc(size_t size) {
+    void* ptr = nullptr;
+    posix_memalign(&ptr, kAVX2Alignment, size);
+    return static_cast<float*>(ptr);
 }
 
-void initialize_kaiming_uniform(float* weights, int fan_in, int fan_out) {
-    float bound = sqrt(6.0f / (fan_in + fan_out));
-    for (int i = 0; i < fan_in * fan_out; i++) {
-        weights[i] = random_uniform(-bound, bound);
-    }
-}
+// Aligned load/store
+__m256 v = _mm256_load_ps(ptr);   // Must be 32-byte aligned
+_mm256_store_ps(ptr, v);           // Must be 32-byte aligned
+```
+
+### 7.3 Cache Blocking Strategy
+
+**Matrix Multiplication**:
+- L3 tiles: 512×512 (fits in 64MB L3)
+- L2 tiles: 64×64 (fits in 512KB L2)
+- L1 micro-kernel: 8×8 (AVX2 registers)
+
+**Attention Computation**:
+- Block QK^T in 64×64 tiles
+- Process softmax in blocks
+- Accumulate weighted sum in AVX2 registers
+
+---
+
+## 8. Hybrid Training Objective
+
+### 8.1 Loss Function
+
+```
+L_total = α × L_JEPA + β × L_LM
+
+Where:
+L_JEPA = MSE(z_predicted, z_target)
+       = (1/N) Σ ||z_pred - z_target||²
+
+L_LM = CrossEntropy(logits, targets)
+     = -(1/N) Σ log P(token_t | token_<t)
+
+Default weights: α = 0.3, β = 0.7
+```
+
+### 8.2 JEPA Masking Strategy
+
+```cpp
+// Mask sampling for JEPA
+struct JEPAMasking {
+    float mask_ratio;  // 0.15 (15%)
+
+    void generate_mask(
+        bool* mask,           // [N] output
+        int N,
+        MaskStrategy strategy  // BLOCK, RANDOM, SPAN
+    );
+
+    // Block masking (recommended for vision)
+    void block_mask(
+        bool* mask,
+        int H, int W,  // Spatial dimensions
+        int block_size = 16
+    );
+};
+```
+
+### 8.3 Multi-Step Prediction
+
+```cpp
+// JEPA multi-step prediction
+struct MultiStepPredictor {
+    int num_steps = 3;
+
+    void predict(
+        const float* context,    // [N, 512]
+        float* predictions,      // [N, num_steps, 512] output
+        int N
+    );
+
+    // Weighted loss (recent steps more important)
+    float compute_loss(
+        const float* predictions,  // [N, num_steps, 512]
+        const float* targets,      // [N, num_steps, 512]
+        int N
+    );
+};
 ```
 
 ---
 
-## 6. Next Steps
+## 9. Summary of Parameter Distribution
 
-1. **Implement attention with AVX2** - Critical for performance
-2. **Implement RoPE** - Position encoding
-3. **Implement RMSNorm** - Normalization
-4. **Implement SwiGLU** - Activation
-5. **Stack into transformer block** - Full layer
-6. **Test forward pass** - Verify correctness
-7. **Benchmark** - Measure performance
-8. **Optimize hot paths** - Profile and improve
+| Component | Parameters | Percentage |
+|-----------|------------|-------------|
+| Vision Encoder | 50M | 16.7% |
+| Language Encoder | 120M | 40.0% |
+| Cross-Modal Fusion | 40M | 13.3% |
+| JEPA Prediction Head | 30M | 10.0% |
+| Auto-Regressive Head | 60M | 20.0% |
+| **TOTAL** | **300M** | **100%** |
+
+**Memory Footprint** (FP32):
+- Parameters: 300M × 4 bytes = **1.2 GB**
+- Activations (batch=1, 4096 context): ~80 MB
+- KV cache: ~48 MB
+- **Total inference memory**: **~1.3 GB**
 
 ---
 
-**Document Status**: Complete
+**Document Status**: Updated for VL-JEPA
 **Next Document**: 02_HARDWARE_OPTIMIZATION.md

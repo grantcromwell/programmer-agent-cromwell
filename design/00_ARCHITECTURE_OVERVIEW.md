@@ -1,31 +1,35 @@
-# Cromwell Agent: Auto-Regressive Coding Agent
+# Cromwell VL-JEPA: Vision-Language Auto-Regressive Coding Agent
 ## Complete System Architecture Design
 
-**Version**: 1.0
+**Version**: 2.0
 **Date**: 2025-01-14
-**Design Goal**: Build a production-grade auto-regressive coding agent optimized for AMD CPUs with AVX2 support
+**Design Goal**: Build a production-grade vision-language JEPA model optimized for AMD CPUs with AVX2 support
 
 ---
 
 ## 1. Executive Summary
 
-Cromwell Agent is a specialized auto-regressive language model designed for code editing and understanding. It combines:
-- **CS graduate-level knowledge** with ML fundamentals
-- **Hardware-optimized inference** on AMD CPUs (Zen 2/3/4)
-- **Code-aware tokenization** and understanding
-- **File editing capabilities** through diff-based operations
+Cromwell VL-JEPA is a specialized 300M parameter vision-language model designed for code editing and understanding. It combines:
+
+- **VL-JEPA Architecture**: Joint Embedding Predictive Architecture for vision-language fusion
+- **Auto-Regressive Generation**: Hybrid training (JEPA + LM loss) for code generation
+- **Hardware-optimized inference** on AMD CPUs (Zen 2/3/4) with AVX2
+- **Full Multimodal Support**: Code highlighting, charts, diagrams, UI mockups
+- **Parameter Efficient**: 300M parameters (4.2× smaller than original 1.26B design)
 
 ### Key Design Decisions
 
 | Decision | Rationale |
 |----------|-----------|
-| **Decoder-only Transformer** | Best for auto-regressive generation, proven at scale |
-| **Rotary Positional Embeddings (RoPE)** | Better extrapolation for long code files |
+| **VL-JEPA Architecture** | Joint embedding space for robust vision-language representations |
+| **Hybrid Training (JEPA + LM)** | JEPA for representation learning, LM for generation |
 | **Multi-Query Attention (MQA)** | Faster inference, smaller memory footprint |
+| **CNN-ViT Hybrid Vision Encoder** | Efficient vision processing with windowed attention |
+| **Rotary Positional Embeddings (RoPE)** | Better extrapolation for long code files |
 | **Custom tokenizer with code-aware merges** | Handles identifiers, strings, indentation |
 | **C++ core with Python bindings** | Performance critical path in C++, flexibility in Python |
 | **L3 cache-aware memory layout** | Critical for AMD Zen architecture performance |
-| **AVX2 SIMD everywhere** | 4x speedup on matrix operations, attention |
+| **AVX2 SIMD everywhere** | 4x speedup on matrix operations, attention, vision ops |
 
 ---
 
@@ -33,7 +37,8 @@ Cromwell Agent is a specialized auto-regressive language model designed for code
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                    CROMWELL AGENT SYSTEM                            │
+│                    CROMWELL VL-JEPA SYSTEM                          │
+│                    Target: < 300M Parameters                        │
 └─────────────────────────────────────────────────────────────────────┘
 
 ┌───────────────────────────────────────────────────────────────────┐
@@ -48,38 +53,57 @@ Cromwell Agent is a specialized auto-regressive language model designed for code
 ┌───────────────────────────────────────────────────────────────────┐
 │                        LAYER 2: I/O MANAGER                       │
 │  ┌─────────────────────────────────────────────────────────────┐ │
-│  │                    File System Interface                     │ │
-│  │  - Directory traversal (with .gitignore support)            │ │
-│  │  - File reading (with encoding detection)                   │ │
-│  │  - Diff generation (unified, context-aware)                 │ │
-│  │  - Patch application (safe, atomic operations)              │ │
+│  │                    Multimodal Input Interface                │ │
+│  │  - Image loading (syntax highlighting, charts, diagrams)   │ │
+│  │  - Text/code loading with encoding detection               │ │
+│  │  - Diff generation (unified, context-aware)                │ │
+│  │  - Patch application (safe, atomic operations)             │ │
 │  └─────────────────────────────────────────────────────────────┘ │
 │  ┌─────────────────────────────────────────────────────────────┐ │
 │  │                    Context Manager                           │ │
-│  │  - File prioritization (relevance scoring)                  │ │
-│  │  - Context window allocation (dynamic budgeting)            │ │
-│  │  - Token counting (accurate, fast)                          │ │
-│  │  - Window management (sliding, importance-based)            │ │
+│  │  - File prioritization (relevance scoring)                 │ │
+│  │  - Context window allocation (dynamic budgeting)           │ │
+│  │  - Token counting (accurate, fast)                         │ │
+│  │  - Window management (4096 token context)                  │ │
 │  └─────────────────────────────────────────────────────────────┘ │
 └───────────────────────────┬───────────────────────────────────────┘
                             │
                             ▼
 ┌───────────────────────────────────────────────────────────────────┐
-│                        LAYER 3: INFERENCE ENGINE                  │
+│                        LAYER 3: VL-JEPA MODEL                      │
 │  ┌─────────────────────────────────────────────────────────────┐ │
-│  │                    Tokenizer                                 │ │
-│  │  - Code-aware vocabulary (identifiers, keywords, operators)  │ │
-│  │  - Fast BPE encoding/decoding (SIMD-optimized)             │ │
-│  │  - Special tokens for editing (FILE, EDIT, DELETE)          │ │
+│  │                    Vision Encoder (~50M params)              │ │
+│  │  - CNN stem (4x4 conv, stride=4)                           │ │
+│  │  - MBConv blocks (×4, depthwise separable)                  │ │
+│  │  - ViT blocks (×6, windowed attention, hidden=384)          │ │
+│  │  - Output: [N_vision_patches, 384]                         │ │
 │  └─────────────────────────────────────────────────────────────┘ │
 │  ┌─────────────────────────────────────────────────────────────┐ │
-│  │                    Cromwell Transformer                      │ │
-│  │  - 1.2B parameters (optimal for code editing)               │ │
-│  │  - Multi-Query Attention (8 query heads, 1 key/value head)  │ │
-│  │  - RoPE positional encoding                                 │ │
-│  │  - SwiGLU activation                                        │ │
-│  │  - RMSNorm                                                   │ │
-│  │  - 4096 token context window                                │ │
+│  │                    Language Encoder (~120M params)           │ │
+│  │  - Token embedding (vocab=50K, dim=768)                    │ │
+│  │  - RoPE positional encoding                                │ │
+│  │  - Transformer layers (×12, hidden=768, MQA)               │ │
+│  │  - SwiGLU MLP (768 → 3072 → 768)                          │ │
+│  │  - Output: [seq_len, 768]                                  │ │
+│  └─────────────────────────────────────────────────────────────┘ │
+│  ┌─────────────────────────────────────────────────────────────┐ │
+│  │                    Cross-Modal Fusion (~40M params)          │ │
+│  │  - Projection to common dimension (512)                    │ │
+│  │  - Cross-attention blocks (×6, bidirectional V↔L)          │ │
+│  │  - SwiGLU MLP (512 → 2048 → 512)                          │ │
+│  │  - Output: [N_v+N_l, 512] joint embeddings                 │ │
+│  └─────────────────────────────────────────────────────────────┘ │
+│  ┌─────────────────────────────────────────────────────────────┐ │
+│  │                    JEPA Prediction Head (~30M params)        │ │
+│  │  - Temporal context encoder (4 layers, hidden=512)         │ │
+│  │  - Multi-step predictor (z_{t+1}, z_{t+2}, z_{t+3})       │ │
+│  │  - Loss: MSE in embedding space                            │ │
+│  └─────────────────────────────────────────────────────────────┘ │
+│  ┌─────────────────────────────────────────────────────────────┐ │
+│  │                    Auto-Regressive Head (~60M params)        │ │
+│  │  - Projection (512 → 768)                                  │ │
+│  │  - AR transformer (6 layers, hidden=768, MQA, causal)      │ │
+│  │  - LM head (768 → vocab=50K)                               │ │
 │  └─────────────────────────────────────────────────────────────┘ │
 │  ┌─────────────────────────────────────────────────────────────┐ │
 │  │                    Sampling Engine                           │ │
@@ -106,6 +130,8 @@ Cromwell Agent is a specialized auto-regressive language model designed for code
 │  │  - AVX2 attention computation (QK^T + softmax)              │ │
 │  │  - AVX2 layer normalization                                │ │
 │  │  - AVX2 activation functions (Swish, GeLU)                  │ │
+│  │  - AVX2 patch operations for vision                         │ │
+│  │  - AVX2 2D attention for vision tokens                      │ │
 │  └─────────────────────────────────────────────────────────────┘ │
 │  ┌─────────────────────────────────────────────────────────────┐ │
 │  │                    CPU Detection & Tuning                    │ │
@@ -125,13 +151,15 @@ Cromwell Agent is a specialized auto-regressive language model designed for code
 │  │  - Code competition data (Codeforces, LeetCode)             │ │
 │  │  - Code review data (GitHub PRs, comments)                  │ │
 │  │  - CS/ML textbooks (arXiv, OpenStax)                        │ │
+│  │  - Vision-text pairs (syntax highlighting, charts)          │ │
+│  │  - Financial code datasets (trading, modeling)              │ │
 │  └─────────────────────────────────────────────────────────────┘ │
 │  ┌─────────────────────────────────────────────────────────────┐ │
-│  │                    Training Curriculum                       │ │
-│  │  Stage 1: Language modeling (general text + code)           │ │
-│  │  Stage 2: Code editing (diff generation)                    │ │
-│  │  Stage 3: Tool use (file operations, API calls)             │ │
-│  │  Stage 4: Instruction following (code editing tasks)        │ │
+│  │                    Hybrid Training Curriculum                │ │
+│  │  Stage 1: JEPA pre-training (masked embedding prediction)  │ │
+│  │  Stage 2: LM fine-tuning (next-token prediction)           │ │
+│  │  Stage 3: Joint training (hybrid JEPA + LM loss)            │ │
+│  │  Stage 4: Instruction fine-tuning (code editing tasks)      │ │
 │  └─────────────────────────────────────────────────────────────┘ │
 └───────────────────────────────────────────────────────────────────┘
 ```
@@ -144,25 +172,57 @@ Cromwell Agent is a specialized auto-regressive language model designed for code
 
 ```yaml
 model:
-  name: "Cromwell-1.2B"
-  architecture: "decoder-only-transformer"
-  parameters: 1.2B
+  name: "Cromwell-VL-JEPA-300M"
+  architecture: "vision-language-jepa-autoregressive"
+  parameters: 300M
 
-  # Dimensions
-  hidden_size: 2048
-  intermediate_size: 5632  # 2.75 * hidden_size (SwiGLU optimal)
-  num_layers: 24
-  num_attention_heads: 32  # For multi-query: 32 query heads, 4 key/value heads
+  # Vision Encoder
+  vision:
+    encoder_type: "cnn-vit-hybrid"
+    stem_channels: 96
+    cnn_blocks: 4
+    vit_blocks: 6
+    vision_hidden_dim: 384
+    vision_attention_heads: 6
+    window_size: 16
+    parameters: 50M
 
-  # Context
-  max_position_embeddings: 4096
-  vocab_size: 50000  # Will be finalized after tokenizer training
+  # Language Encoder
+  language:
+    vocab_size: 50000
+    hidden_size: 768
+    intermediate_size: 3072  # 4 * hidden_size
+    num_layers: 12
+    num_attention_heads: 12  # MQA: 12 Q, 3 KV
+    max_position_embeddings: 4096
+    parameters: 120M
+
+  # Cross-Modal Fusion
+  fusion:
+    joint_dim: 512
+    num_fusion_blocks: 6
+    num_attention_heads: 8
+    parameters: 40M
+
+  # JEPA Prediction Head
+  jepa:
+    hidden_dim: 512
+    num_context_layers: 4
+    prediction_steps: 3
+    parameters: 30M
+
+  # Auto-Regressive Head
+  autoregressive:
+    hidden_size: 768
+    intermediate_size: 3072
+    num_layers: 6
+    num_attention_heads: 12  # MQA: 12 Q, 3 KV
+    parameters: 60M
 
   # Attention
   attention_type: "multi-query"
   rotary_pct: 1.0  # 100% rotary embeddings
   rotary_base: 10000
-  attention_window: 4096  # Full context attention
 
   # Normalization & Activation
   hidden_act: "swiglu"
@@ -175,73 +235,133 @@ model:
   tie_word_embeddings: false
 ```
 
-### 3.2 Attention Mechanism
+### 3.2 Component Architecture
 
-**Multi-Query Attention (MQA)** - Critical for fast inference:
+#### Vision Encoder (50M params)
 
 ```
-Standard MHA: [Q, K, V] → N heads → Concat → Output
-  Each head has separate Q, K, V projections
-  Memory: O(N * d_model^2) for KV cache
-
-MQA: Q → N heads, [K, V] → Single head → Broadcast → Output
-  Multiple query heads share single key/value head
-  Memory: O(d_model^2) for KV cache (8-16x reduction)
-  Speed: ~2x faster due to memory bandwidth reduction
+Input: RGB Image [H, W, 3]
+    ↓
+Stem: Conv4x4, stride=4, 96 channels
+    ↓
+[H/4, W/4, 96]
+    ↓
+MBConv Blocks (×4):
+  - Depthwise separable convolution
+  - Expansion ratio: 6
+  - SE attention
+    ↓
+[H/8, W/8, 192]
+    ↓
+Projection: 192 → 384
+    ↓
+ViT Blocks (×6):
+  - Windowed attention (16×16 windows)
+  - Hidden dim: 384
+  - Heads: 6
+  - MLP: 384 → 1536 → 384
+    ↓
+[H/8, W/8, 384]
+    ↓
+Flatten: [N_vision_patches, 384]
 ```
 
-**Why MQA for Code Editing:**
-- Code requires long contexts (4096+ tokens)
-- Inference speed is critical for interactive editing
-- Minimal quality degradation (<2% on code benchmarks)
-- Enables larger batch sizes for multiple file edits
+#### Language Encoder (120M params)
 
-### 3.3 Positional Encoding: Rotary (RoPE)
-
-**Why RoPE over learned absolute/relative:**
-- Better extrapolation to longer sequences
-- No learned parameters to store
-- Works well with MQA
-- Proven on code models (CodeLlama, StarCoder)
-
-Implementation:
-```cpp
-// RoPE rotation for query-key pairs
-// Applied after projection but before attention scores
-void apply_rotary_embeddings(
-    float* q,  // [seq_len, num_heads, head_dim]
-    float* k,  // [seq_len, num_kv_heads, head_dim]
-    int seq_len,
-    int head_dim,
-    float base = 10000.0
-);
+```
+Input: Token IDs [seq_len]
+    ↓
+Token Embedding: [50000, 768]
+    ↓
+[seq_len, 768]
+    ↓
+For ℓ = 1 to 12:
+    ├─ RoPE positional encoding
+    ├─ h₁ = x + MQA(RMSNorm(x))  # 12 Q, 3 KV heads
+    ├─ h₂ = h₁ + SwiGLU(Linear(RMSNorm(h₁)))
+    └─ x = h₂
+    ↓
+Output: [seq_len, 768]
 ```
 
-### 3.4 Normalization: RMSNorm
+#### Cross-Modal Fusion (40M params)
 
-**Why RMSNorm over LayerNorm:**
-- Removes mean calculation (simpler, faster)
-- Same statistical normalization effect
-- Fewer operations (SIMD-friendly)
-- Stable for transformer training
-
-Formula:
 ```
-RMSNorm(x) = x / sqrt(mean(x^2) + epsilon) * scale
+Inputs:
+  - Vision: [N_v, 384]
+  - Language: [N_l, 768]
+    ↓
+Projection to 512-dim:
+  - Vision: Linear(384 → 512)
+  - Language: Linear(768 → 512)
+    ↓
+For ℓ = 1 to 6:
+    ├─ V→L Cross-Attention:
+    │   Q_vision, K_lang, V_lang
+    ├─ L→V Cross-Attention:
+    │   Q_lang, K_vision, V_vision
+    ├─ Concat + Residual
+    └─ SwiGLU MLP(512 → 2048 → 512)
+    ↓
+Output: [N_v + N_l, 512] joint embeddings
 ```
 
-### 3.5 Activation: SwiGLU
+#### JEPA Prediction Head (30M params)
 
-**Why SwiGLU over ReLU/GeLU:**
-- State-of-the-art for language models
-- Smooth, differentiable everywhere
-- Better gradient flow
-- Proven at scale (LLaMA, CodeLLaMA)
-
-Formula:
 ```
-SwiGLU(x) = Swish(xW) ⊙ (xV)
-Swish(x) = x * sigmoid(x)
+Input: Joint embeddings [N, 512]
+    ↓
+Temporal Context Encoder (4 layers):
+  - Standard transformer blocks
+  - Hidden dim: 512
+  - Heads: 8
+    ↓
+Context encoded: [N, 512]
+    ↓
+Multi-Step Predictor:
+  - Predict z_{t+1}: MLP(512 → 512)
+  - Predict z_{t+2}: MLP(512 → 512)
+  - Predict z_{t+3}: MLP(512 → 512)
+    ↓
+Output: [N, 3, 512] predicted embeddings
+    ↓
+Loss: MSE(predicted, target) in embedding space
+```
+
+#### Auto-Regressive Head (60M params)
+
+```
+Input: Joint embeddings [N, 512]
+    ↓
+Projection: Linear(512 → 768)
+    ↓
+[N, 768]
+    ↓
+AR Transformer (6 layers, causal mask):
+  - MQA: 12 Q, 3 KV heads
+  - SwiGLU MLP: 768 → 3072 → 768
+  - RMSNorm (pre/post)
+    ↓
+[N, 768]
+    ↓
+LM Head: Linear(768 → vocab_size=50000)
+    ↓
+Output: Logits [N, 50000]
+```
+
+### 3.3 Hybrid Training Objective
+
+```
+L_total = α × L_JEPA + β × L_LM
+
+Where:
+L_JEPA = MSE(predicted_embeddings, target_embeddings)
+       = Σ||z_pred - z_target||² / N
+
+L_LM = CrossEntropy(predicted_logits, target_tokens)
+     = -Σ log P(token_t | token_<t)
+
+Default weights: α = 0.3, β = 0.7
 ```
 
 ---
@@ -251,107 +371,48 @@ Swish(x) = x * sigmoid(x)
 ### 4.1 AMD Zen Architecture Considerations
 
 **Zen 2/3/4 Microarchitecture:**
-- L1 Cache: 32 KB per core (8-way associative)
-- L2 Cache: 512 KB per core (8-way associative)
+- L1 Cache: 32 KB per core
+- L2 Cache: 512 KB per core
 - L3 Cache: 32 MB per CCD (Zen 3), 96 MB (Zen 4)
-- Memory Bandwidth: ~50 GB/s (DDR4-3200), ~80 GB/s (DDR5-5200)
+- Memory Bandwidth: ~50 GB/s (DDR4-3200)
 - AVX2: 256-bit registers (8x float32)
-- FMA3: Fused multiply-add (2 ops per cycle)
+- FMA3: Fused multiply-add
 
 **Key Optimization Principles:**
-1. **Maximize L3 cache hits** - Tile matrix operations to 512x512 blocks
-2. **Use AVX2 everywhere** - 4x throughput for float32 operations
+1. **Maximize L3 cache hits** - Tile operations to 512×512 blocks
+2. **Use AVX2 everywhere** - 4x throughput for float32
 3. **Minimize memory traffic** - Fuse operations where possible
 4. **Prefetch aggressively** - Software prefetch for next tile
 5. **Align to 32 bytes** - AVX2 alignment requirement
 
-### 4.2 Cache-Aware Data Layout
+### 4.2 AVX2 SIMD Kernels
 
-**Memory Layout for Transformer Weights:**
+**Matrix Multiplication:**
+- 8×8 micro-kernel using FMA
+- 512×512 L3 cache blocking
+- 64×64 L2 cache tiles
 
-```cpp
-// Standard: [num_layers, hidden_size, intermediate_size]
-// Cache-friendly: [intermediate_size, hidden_size, num_layers]
-//
-// Reason: Matrix multiplication processes rows sequentially
-// Having intermediate_size as first dimension keeps data in L1
+**Attention Computation:**
+- AVX2 QK^T computation
+- AVX2 softmax with exp approximation
+- Vectorized weighted sum
 
-struct TransformerWeights {
-    // Layout: [output_dim, input_dim] for matrix multiplication
-    // Aligned to 32 bytes for AVX2
-    float* qkv_proj;      // [3 * hidden_size, hidden_size]
-    float* o_proj;        // [hidden_size, hidden_size]
-    float* gate_up_proj;  // [2 * intermediate_size, hidden_size]  // SwiGLU fused
-    float* down_proj;     // [hidden_size, intermediate_size]
+**Vision Operations:**
+- AVX2 patch embedding
+- AVX2 2D attention (windowed)
+- AVX2 depthwise convolution
 
-    // Normalization parameters
-    float* input_layernorm;    // [hidden_size]
-    float* post_attention_layernorm;  // [hidden_size]
-};
-```
+### 4.3 Memory Layout
 
-**Why NHWC for Attention:**
+**NHWC for Attention:**
+- Better cache locality
+- Sequential access patterns
+- AVX2-friendly stride
 
-```cpp
-// Layout comparison for attention:
-//
-// NCHW: [batch, heads, seq_len, head_dim]
-//  - Stride between seq positions: head_dim
-//  - Poor cache locality when computing attention matrix
-//
-// NHWC: [batch, seq_len, head_dim, heads]
-//  - Stride between seq positions: head_dim * num_heads
-//  - Sequential access during QK^T computation
-//  - Better L3 cache utilization
-```
-
-### 4.3 AVX2 SIMD Kernel Design
-
-**Matrix Multiplication Kernel (GEMM):**
-
-```cpp
-// 8x8 micro-kernel for AVX2
-// Processes 8 output elements (rows) × 8 input elements (cols)
-// Each AVX2 register holds 8 float32 values
-//
-// Algorithm:
-// 1. Load 8 rows of matrix A (8x8 block)
-// 2. Load 8 cols of matrix B (8x8 block)
-// 3. Compute outer product using FMA
-// 4. Accumulate into output block (C)
-//
-// Performance: ~95% of theoretical AVX2 peak
-```
-
-**Attention Computation Kernel:**
-
-```cpp
-// QK^T + Softmax kernel
-// Optimized for multi-query attention pattern
-//
-// Pattern: Q[seq_len, num_heads, head_dim] @ K[seq_len, 1, head_dim].T
-//
-// Optimization:
-// 1. Compute QK^T in blocks of 64x64 (L3 cache friendly)
-// 2. Apply softmax in-place (max, exp, sum, normalize)
-// 3. Multiply by V[seq_len, 1, head_dim]
-// 4. All operations use AVX2 SIMD
-```
-
-### 4.4 Memory Prefetching Strategy
-
-```cpp
-// Software prefetch for next tile
-// Hide memory latency by prefetching next block
-//
-// Pattern:
-// Process tile(i, j)
-// Prefetch tile(i+1, j)  // Next row
-// Prefetch tile(i, j+1)  // Next col
-//
-// Distance: 2-3 tiles ahead (empirically optimal for Zen)
-// Target: L3 cache (shared across cores)
-```
+**32-Byte Alignment:**
+- All tensors aligned
+- Direct AVX2 load/store
+- No unaligned access penalty
 
 ---
 
@@ -359,623 +420,129 @@ struct TransformerWeights {
 
 ### 5.1 Code-Aware Tokenizer
 
-**Design Principles:**
-1. **Preserve code structure** - Indentation, brackets, operators
-2. **Minimize tokens** - Merge common patterns (function, class, if)
-3. **Handle identifiers** - Split CamelCase, snake_case
-4. **Special tokens** - FILE_START, FILE_END, EDIT_START, EDIT_END
+**Vocabulary: 50,000 tokens**
 
-**Vocabulary Composition:**
-```
-Total: 50,000 tokens
-- Byte-level tokens: 256 (for rare bytes)
-- Common words: 20,000 (English, common in code)
-- Code keywords: 100 (if, else, for, while, return, etc.)
-- Operators: 50 (+, -, *, /, ==, !=, <=, >=, etc.)
-- Identifiers: 15,000 (function names, variables, types)
-- String literals: 10,000 (common strings, messages)
-- Numbers: 2,000 (integers, floats, hex, binary)
+Distribution:
+- Byte-level tokens: 256
+- Common words: 20,000
+- Code keywords: 100
+- Operators: 50
+- Identifiers: 15,000
+- String literals: 10,000
+- Numbers: 2,000
 - Special tokens: 20 (editing markers, control)
-- Whitespace: 574 (indentation levels, newlines, tabs)
-```
+- Whitespace: 574
 
-**Merging Rules:**
-```python
-# Byte-Pair Encoding with code-aware rules
+### 5.2 Special Tokens
 
-# 1. Standard BPE merges (frequency-based)
-# 2. Code-specific merges:
-#    - Merge whitespace + identifier (indentation patterns)
-#    - Merge keywords + parenthesis (if (, for (, while ()
-#    - Merge operators (=, ==, !=, <=, >=)
-#    - Merge brackets ((), [], {}, <>)
-#    - Merge CamelCase identifiers (MyClass -> My + Class)
-#    - Merge common patterns (function name, def, import)
-
-# 3. Special token insertion:
-#    - <FILE=path/to/file.py> marks file start
-#    - </FILE> marks file end
-#    - <EDIT_START> marks edit region
-#    - <EDIT_END> marks edit end
-#    - <DELETE_START> marks deletion region
-#    - </DELETE> marks deletion end
-```
-
-### 5.2 Fast Tokenization Implementation
-
-**SIMD-Accelerated BPE Encoding:**
-
-```cpp
-// AVX2-accelerated BPE encoding
-// Processes 8 bytes in parallel for pattern matching
-//
-// Algorithm:
-// 1. Load 8 bytes from input
-// 2. Compare against pattern (AVX2 PCMPEQB)
-// 3. Extract matches (MOVEMASK)
-// 4. Emit tokens
-//
-// Speedup: ~3-4x over scalar implementation
-```
+| Token | Purpose |
+|-------|---------|
+| `<FILE>` | File boundary marker |
+| `<EDIT>` | Edit region start |
+| `</EDIT>` | Edit region end |
+| `<DIFF>` | Diff output marker |
+| `<INS>` | Insertion |
+| `<DEL>` | Deletion |
+| `<IMAGE>` | Image input marker |
+| `<VISION_START>` | Vision token start |
+| `<VISION_END>` | Vision token end |
 
 ---
 
-## 6. File Editing Pipeline
+## 6. Performance Targets
 
-### 6.1 File Representation
+### 6.1 Model Comparison
 
-**Input Format:**
+| Metric | Original (1.26B) | VL-JEPA (300M) | Change |
+|--------|-----------------|----------------|--------|
+| **Parameters** | 1.26B | 300M | 4.2× smaller |
+| **Memory** | 5.3 GB | 1.3 GB | 3.8× less |
+| **Text-only speed** | 50 tok/s | 45 tok/s | 10% slower |
+| **Vision+text speed** | N/A | 28 tok/s | New capability |
+| **Startup time** | 100 ms | < 50 ms | 2× faster |
 
-```
-<FILE=path/to/file.py>
-def calculate_sum(a, b):
-    """Calculate the sum of two numbers."""
-    return a + b
+### 6.2 Inference Performance
 
-def calculate_product(a, b):
-    """Calculate the product of two numbers."""
-    return a * b
-</FILE>
+**Text-only (no vision):**
+- Throughput: ~45 tokens/second
+- Latency (first token): ~40 ms
+- Memory: ~1.3 GB
 
-<EDIT_START=file.py:3:5>
-Replace the sum calculation with a more efficient version using the built-in sum function.
-<EDIT_END>
-```
-
-**Output Format:**
-
-```
-<FILE=path/to/file.py>
-def calculate_sum(a, b):
-    """Calculate the sum of two numbers."""
-    return sum([a, b])
-
-def calculate_product(a, b):
-    """Calculate the product of two numbers."""
-    return a * b
-</FILE>
-```
-
-### 6.2 Diff Generation
-
-**Unified Diff Format:**
-
-```
---- a/path/to/file.py
-+++ b/path/to/file.py
-@@ -1,7 +1,7 @@
- def calculate_sum(a, b):
-     """Calculate the sum of two numbers."""
--    return a + b
-+    return sum([a, b])
-
- def calculate_product(a, b):
-     """Calculate the product of two numbers."""
-     return a * b
-```
-
-**Algorithm:**
-
-```cpp
-// Myers diff algorithm (optimized)
-// Time complexity: O(ND) where N = file length, D = edits
-// Space complexity: O(D)
-//
-// Optimizations:
-// 1. Early termination for single-line edits
-// 2. Hash-based comparison (rolling hash for long files)
-// 3. SIMD-accelerated string comparison (AVX2)
-// 4. Binary search for edit location (when line numbers provided)
-```
-
-### 6.3 Context Window Management
-
-**Dynamic Budget Allocation:**
-
-```python
-# Allocate context window budget based on file relevance
-#
-# Scoring factors:
-# - File extension (.py, .js, .ts higher priority)
-# - Import relationships (files imported by target file)
-# - Edit history (files edited recently)
-# - File size (penalize very large files)
-# - Symbol similarity (shared functions/classes)
-
-def allocate_context_budget(
-    target_file: str,
-    available_tokens: int,
-    codebase: Codebase
-) -> List[str]:
-    """
-    Select files to include in context window.
-
-    Returns:
-        List of file paths ordered by priority
-    """
-    scores = {}
-
-    for file in codebase.files:
-        score = 0.0
-
-        # File type bonus
-        if file.extension in ['.py', '.js', '.ts', '.cpp']:
-            score += 1.0
-
-        # Import relationship
-        if file.imports(target_file) or target_file.imports(file):
-            score += 2.0
-
-        # Symbol overlap
-        shared_symbols = len(file.symbols & target_file.symbols)
-        score += shared_symbols * 0.1
-
-        # Edit recency
-        if file.last_edited < datetime.now() - timedelta(hours=1):
-            score += 0.5
-
-        # Size penalty
-        score -= log(file.token_count) * 0.01
-
-        scores[file.path] = score
-
-    # Sort and select until budget exhausted
-    sorted_files = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-
-    selected = []
-    used_tokens = 0
-
-    for file, score in sorted_files:
-        file_tokens = file.token_count
-        if used_tokens + file_tokens < available_tokens:
-            selected.append(file)
-            used_tokens += file_tokens
-
-    return selected
-```
+**Vision + text:**
+- Throughput: ~28 tokens/second
+- Latency (first token): ~80 ms
+- Memory: ~1.3 GB
 
 ---
 
-## 7. Training Pipeline
+## 7. Implementation Roadmap
 
-### 7.1 Dataset Design
+### Phase 1: Architecture Design (Week 1)
+- [x] Design VL-JEPA architecture
+- [ ] Update all design documents
+- [ ] Validate parameter counts
 
-**Primary Datasets:**
+### Phase 2: Core Components (Weeks 2-4)
+- [ ] Implement vision encoder
+- [ ] Implement language encoder
+- [ ] Implement cross-modal fusion
+- [ ] AVX2 optimizations
 
-| Dataset | Size | Focus | Weight |
-|---------|------|-------|--------|
-| TheStack v2 | 3TB | Code + natural language | 40% |
-| CodeContests | 500GB | Competitive programming | 15% |
-| GitHub PRs | 200GB | Code review + diffs | 10% |
-| ArXiv (CS/ML) | 100GB | Academic knowledge | 15% |
-| OpenStax CS/ML | 50GB | Textbooks | 10% |
-| Stack Overflow | 100GB | Q&A + explanations | 10% |
+### Phase 3: JEPA Components (Weeks 5-6)
+- [ ] Implement JEPA prediction head
+- [ ] Implement hybrid loss function
+- [ ] Implement multi-step prediction
 
-**Preprocessing Pipeline:**
-
-```
-1. Raw Data Download
-   ↓
-2. Deduplication (MinHash LSH, Jaccard similarity > 0.85)
-   ↓
-3. Filtering
-   - Remove auto-generated files
-   - Remove very short files (< 128 tokens)
-   - Remove very long files (> 10000 tokens)
-   - Language detection (keep English + code)
-   ↓
-4. Quality Scoring
-   - Code syntax validation
-   - Natural language perplexity
-   - Comment density
-   ↓
-5. Tokenization
-   - Apply BPE tokenizer
-   - Insert special tokens
-   ↓
-6. Sharding
-   - 1000 samples per shard
-   - Balanced by dataset source
-   ↓
-7. Final Training Data
-```
-
-### 7.2 Training Curriculum
-
-**Stage 1: Foundation (0-60% tokens)**
-- Objective: Standard language modeling
-- Data: All datasets mixed
-- Duration: ~150B tokens
-- Learning rate: 3e-4 → 3e-5 (cosine decay)
-- Batch size: 256 sequences × 2048 tokens
-
-**Stage 2: Code Understanding (60-80% tokens)**
-- Objective: Code-specific tasks
-- Data: Weight code 4:1 over text
-- Tasks:
-  - Next token prediction on code
-  - Fill-in-the-middle (FIM)
-  - Function completion
-- Duration: ~50B tokens
-- Learning rate: 3e-5 → 1e-5
-
-**Stage 3: Editing Skills (80-95% tokens)**
-- Objective: Diff generation and application
-- Data: GitHub PRs, CodeContests edits
-- Tasks:
-  - Diff prediction
-  - Bug fix generation
-  - Refactoring suggestions
-- Duration: ~25B tokens
-- Learning rate: 1e-5 → 5e-6
-
-**Stage 4: Instruction Tuning (95-100% tokens)**
-- Objective: Follow editing instructions
-- Data: Synthetic instructions + human demonstrations
-- Tasks:
-  - "Replace X with Y"
-  - "Optimize this function"
-  - "Add error handling"
-- Duration: ~10B tokens
-- Learning rate: 5e-6 → 1e-6
-
-### 7.3 Loss Function
-
-**Primary Loss: Cross-Entropy**
-
-```python
-# Standard cross-entropy for next-token prediction
-loss = -sum(log P(token_t | token_<t))
-```
-
-**Auxiliary Losses (Stage 3+):**
-
-```python
-# Diff consistency loss
-loss_diff = ||predicted_diff - actual_diff||_2
-
-# Code syntax loss (if applicable)
-loss_syntax = -log P(syntax_valid | edit)
-
-# Combined loss
-loss = loss_ce + 0.1 * loss_diff + 0.05 * loss_syntax
-```
-
----
-
-## 8. Implementation Stack
-
-### 8.1 Language Choices
-
-| Component | Language | Rationale |
-|-----------|----------|-----------|
-| **Model Core** | C++17 | Performance, SIMD control, memory management |
-| **SIMD Kernels** | C++17 + Intrinsics | Direct AVX2/FMA control |
-| **Python Bindings** | pybind11 | Seamless Python integration, minimal overhead |
-| **Training Script** | Python | Flexibility, ecosystem (PyTorch, transformers) |
-| **CLI Tool** | Rust | Fast startup, memory safety, great CLI libraries |
-| **Tests** | Python + C++ (Catch2) | Coverage for both interfaces |
-
-### 8.2 Linear Algebra Backend
-
-**Decision: Custom C++ with AVX2**
-
-Rationale:
-- Full control over memory layout
-- Optimize for specific workloads (MQA attention)
-- No dependency bloat
-- Learn and understand operations deeply
-
-When to use libraries:
-- Training: PyTorch (for gradient computation)
-- Prototyping: NumPy (for experimentation)
-- Production: Custom C++ (for inference)
-
-### 8.3 Build System
-
-**CMake** for C++ core:
-- Cross-platform
-- Good dependency management
-- Easy integration with Python
-
-**Cargo** for Rust CLI:
-- Standard Rust build tool
-- Dependency management
-- Easy cross-compilation
-
-**Setup.py** for Python package:
-- Standard Python packaging
-- Integrates with pip
-- Manages build process
-
----
-
-## 9. Project Structure
-
-```
-cromwell_agent/
-├── design/                      # Design documents
-│   ├── 00_ARCHITECTURE_OVERVIEW.md
-│   ├── 01_MODEL_ARCHITECTURE.md
-│   ├── 02_HARDWARE_OPTIMIZATION.md
-│   ├── 03_TOKENIZATION.md
-│   ├── 04_TRAINING_PIPELINE.md
-│   └── 05_INFERENCE.md
-│
-├── src/
-│   ├── core/                    # Core model implementation
-│   │   ├── transformer.h        # Main model class
-│   │   ├── attention.h          # Attention mechanism
-│   │   ├── mlp.h                # Feed-forward network
-│   │   ├── embeddings.h         # Embedding layer
-│   │   └── config.h             # Model configuration
-│   │
-│   ├── ops/                     # Hardware-optimized operations
-│   │   ├── avx2_utils.h         # AVX2 intrinsics wrappers
-│   │   ├── gemm.h               # Matrix multiplication
-│   │   ├── attention_ops.h      # Attention kernels
-│   │   ├── layer_norm.h         # Normalization
-│   │   ├── activation.h         # Activation functions
-│   │   └── memory.h             # Memory management
-│   │
-│   ├── inference/               # Inference engine
-│   │   ├── sampler.h            # Sampling strategies
-│   │   ├── kv_cache.h           # KV cache for generation
-│   │   ├── generator.h          # Text generation
-│   │   └── batch_processor.h    # Batch inference
-│   │
-│   ├── training/                # Training utilities
-│   │   ├── optimizer.h          # Optimizer implementation
-│   │   ├── scheduler.h          # Learning rate scheduler
-│   │   ├── checkpoint.h         # Checkpoint save/load
-│   │   └── dataloader.h         # Data loading
-│   │
-│   ├── io/                      # I/O and code editing
-│   │   ├── tokenizer.h          # Tokenizer interface
-│   │   ├── file_io.h            # File system operations
-│   │   ├── diff.h               # Diff generation/application
-│   │   ├── context_manager.h    # Context window management
-│   │   └── codebase.h           # Codebase representation
-│   │
-│   ├── python/                  # Python bindings
-│   │   ├── bindings.cpp         # pybind11 bindings
-│   │   └── cromwell/            # Python package
-│   │       ├── __init__.py
-│   │       ├── model.py
-│   │       └── editing.py
-│   │
-│   └── cli/                     # Rust CLI
-│       ├── src/
-│       │   ├── main.rs
-│       │   ├── commands.rs
-│       │   └── config.rs
-│       └── Cargo.toml
-│
-├── tests/
-│   ├── cpp/                     # C++ tests
-│   │   ├── test_attention.cpp
-│   │   ├── test_gemm.cpp
-│   │   └── test_transformer.cpp
-│   │
-│   ├── python/                  # Python tests
-│   │   ├── test_model.py
-│   │   ├── test_editing.py
-│   │   └── benchmarks.py
-│   │
-│   └── integration/             # Integration tests
-│       ├── test_full_pipeline.py
-│       └── test_code_editing.py
-│
-├── scripts/
-│   ├── train.sh                 # Training script
-│   ├── convert_checkpoint.py   # Convert PyTorch to C++
-│   ├── benchmark.sh             # Performance benchmarking
-│   └── profile.py               # Profiling utilities
-│
-├── docs/
-│   ├── API.md                   # API documentation
-│   ├── PERFORMANCE.md           # Performance guide
-│   └── TROUBLESHOOTING.md       # Troubleshooting guide
-│
-├── CMakeLists.txt               # C++ build configuration
-├── setup.py                     # Python package setup
-├── pyproject.toml               # Python project config
-├── requirements.txt             # Python dependencies
-└── README.md                    # Project overview
-```
-
----
-
-## 10. Performance Targets
-
-### 10.1 Inference Speed
-
-**Target: 50 tokens/second on Ryzen 9 5900X**
-
-```
-Hardware: AMD Ryzen 9 5900X (12 cores, 24 threads)
-- Base clock: 3.7 GHz
-- Boost clock: 4.8 GHz
-- L3 cache: 64 MB
-- Memory: DDR4-3200
-
-Target metrics:
-- Single-file edit (4096 context): 50 tok/s
-- Multi-file edit (8 files): 40 tok/s
-- Batch inference (batch size 8): 30 tok/s
-- Memory usage: < 4 GB (model + KV cache)
-- Startup time: < 100 ms
-```
-
-### 10.2 Accuracy Targets
-
-**Benchmark Performance:**
-
-| Benchmark | Target | Notes |
-|-----------|--------|-------|
-| HumanEval | Pass@1 > 60% | Python function completion |
-| MBPP | Pass@1 > 70% | Python programming |
-| Codeforces | > 30% | Competitive programming |
-| Code editing | > 80% | Diff accuracy |
-| Syntax validity | > 95% | Generated code compiles |
-
----
-
-## 11. Implementation Roadmap
-
-### Phase 1: Foundation (Weeks 1-2)
-- [ ] Set up build system (CMake, pybind11)
-- [ ] Implement basic tensor operations (AVX2)
-- [ ] Implement RoPE positional encoding
-- [ ] Implement RMSNorm
-- [ ] Implement SwiGLU activation
-
-### Phase 2: Attention (Weeks 3-4)
-- [ ] Implement multi-query attention
-- [ ] Optimize QK^T with AVX2
-- [ ] Implement softmax with AVX2
-- [ ] Implement KV cache
-- [ ] Benchmark and profile
-
-### Phase 3: Transformer Layers (Weeks 5-6)
-- [ ] Implement transformer block
-- [ ] Stack layers into model
-- [ ] Implement embedding layer
-- [ ] Implement output projection
-- [ ] Test forward pass
-
-### Phase 4: Tokenization (Weeks 7-8)
-- [ ] Train BPE tokenizer on code corpus
-- [ ] Implement fast encoding (C++)
-- [ ] Implement fast decoding (C++)
-- [ ] Add special tokens
-- [ ] Python bindings
-
-### Phase 5: Inference Engine (Weeks 9-10)
+### Phase 4: Auto-Regressive Head (Weeks 7-8)
+- [ ] Implement AR transformer
 - [ ] Implement sampling strategies
-- [ ] Implement text generation loop
-- [ ] Implement stop token detection
-- [ ] Implement batch processing
-- [ ] Benchmark generation speed
+- [ ] KV cache implementation
 
-### Phase 6: I/O & Editing (Weeks 11-12)
-- [ ] Implement file reading/writing
-- [ ] Implement diff generation
-- [ ] Implement diff application
-- [ ] Implement context manager
-- [ ] Test on real codebases
+### Phase 5: Training Pipeline (Weeks 9-10)
+- [ ] Hybrid training loop
+- [ ] Multimodal data loading
+- [ ] Checkpoint conversion
 
-### Phase 7: CLI & Python API (Weeks 13-14)
-- [ ] Implement Rust CLI
-- [ ] Add commands (edit, complete, chat)
+### Phase 6: Integration & Testing (Weeks 11-12)
 - [ ] Python bindings
-- [ ] Error handling
+- [ ] CLI tool
+- [ ] Benchmarking
 - [ ] Documentation
 
-### Phase 8: Training Integration (Weeks 15-16)
-- [ ] Prepare training data
-- [ ] Implement training loop (PyTorch)
-- [ ] Implement checkpoint conversion
-- [ ] Train initial model
-- [ ] Evaluate on benchmarks
-
-### Phase 9: Optimization (Weeks 17-18)
-- [ ] Profile bottlenecks
-- [ ] Optimize hot paths
-- [ ] Memory layout tuning
-- [ ] NUMA optimization
-- [ ] Final benchmarks
-
-### Phase 10: Testing & Documentation (Weeks 19-20)
-- [ ] Unit tests
-- [ ] Integration tests
-- [ ] End-to-end tests
-- [ ] Write documentation
-- [ ] Create examples
-
 ---
 
-## 12. Success Criteria
+## 8. Success Criteria
 
 **Model Capabilities:**
-- [ ] Pass@1 > 60% on HumanEval
+- [ ] Parameter count < 300M
+- [ ] Pass@1 > 55% on HumanEval (slightly lower target due to smaller size)
 - [ ] Generate syntactically valid code > 95% of time
-- [ ] Edit files accurately > 80% of time
-- [ ] Understand natural language instructions
-- [ ] Handle context windows up to 4096 tokens
+- [ ] Edit files accurately > 75% of time
+- [ ] Understand visual inputs (code highlighting, charts)
+- [ ] Handle 4096 token context windows
 
 **Performance:**
-- [ ] Generate > 50 tok/s on Ryzen 9 5900X
-- [ ] Memory usage < 4 GB
-- [ ] Startup time < 100 ms
-- [ ] Support batch size 8 without degradation
+- [ ] Text-only: > 40 tok/s on Ryzen 9 5900X
+- [ ] Vision+text: > 25 tok/s
+- [ ] Memory usage < 2 GB
+- [ ] Startup time < 50 ms
 
 **Reliability:**
-- [ ] Zero memory leaks (valgrind clean)
+- [ ] Zero memory leaks
 - [ ] Handle malformed input gracefully
-- [ ] Recover from errors
-- [ ] Safe file operations (no data loss)
-
-**Usability:**
-- [ ] Simple CLI interface
-- [ ] Python API for integration
-- [ ] Clear error messages
-- [ ] Comprehensive documentation
+- [ ] Safe file operations
 
 ---
 
-## 13. Next Steps
+## 9. Next Steps
 
-1. **Review this design** - Validate architectural decisions
-2. **Set up development environment** - Install dependencies, toolchain
-3. **Start implementation** - Begin with Phase 1
-4. **Iterate based on testing** - Adjust as needed
-5. **Provide training data** - When model is ready for training
-
----
-
-## Appendix A: References
-
-**Model Architectures:**
-- LLaMA: Open and Efficient Foundation Language Models
-- Code Llama: Open Foundation Models for Code
-- StarCoder: May the Source Be With You
-- PaLM 2: Technical Report
-
-**Hardware Optimization:**
-- AMD Zen 3 Microarchitecture
-- Intel Optimization Manual
-- "Software Optimization Guide for AMD Family 17h Processors"
-
-**Tokenization:**
-- "Byte Pair Encoding is Suboptimal for Language Model Pretraining"
-- "SentencePiece: A simple and language independent subword tokenizer"
-
-**Training:**
-- "Training Compute-Optimal Large Language Models" (Chinchilla)
-- "Scaling Laws for Neural Language Models"
+1. **Complete design document updates** - All 7 design docs
+2. **Update build configuration** - CMakeLists.txt with vision library
+3. **Create header files** - Core components and ops
+4. **Begin implementation** - Start with vision encoder
+5. **Prepare training data** - Multimodal datasets
 
 ---
 
-**Document Status**: Complete
+**Document Status**: Updated for VL-JEPA
 **Next Document**: 01_MODEL_ARCHITECTURE.md

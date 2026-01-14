@@ -1,7 +1,7 @@
-# Cromwell Agent: Inference & Code Editing
-## Text Generation, Sampling, and File Operations
+# Cromwell VL-JEPA: Inference & Code Editing
+## Multimodal Text Generation, JEPA-Guided Decoding, and File Operations
 
-**Version**: 1.0
+**Version**: 2.0
 **Date**: 2025-01-14
 
 ---
@@ -9,15 +9,23 @@
 ## 1. Inference Architecture
 
 ```
-User Request (Edit file X to do Y)
+User Request (Edit file X to do Y, optionally with image)
          ↓
     Context Manager
-    (Select relevant files)
+    (Select relevant files + load image)
          ↓
-    Tokenizer
-    (Encode to tokens)
+    ┌─────────────────────┐
+    │ Multimodal Encoder   │
+    ├─────────────────────┤
+    │ Vision Encoder       │  ← Optional (if image provided)
+    │ Language Encoder     │
+    │ Cross-Modal Fusion   │
+    └─────────┬───────────┘
+              ↓
+    JEPA-Guided Embeddings
+    (Improved representations)
          ↓
-    Cromwell Model
+    Auto-Regressive Head
     (Generate tokens autoregressively)
          ↓
     Sampler
@@ -40,9 +48,138 @@ User Request (Edit file X to do Y)
 
 ---
 
-## 2. Sampling Strategies
+## 2. Multimodal Inference
 
-### 2.1 Temperature Sampling
+### 2.1 Text-Only Inference
+
+```python
+def generate_text_only(
+    model,
+    prompt: str,
+    max_tokens: int = 512,
+    temperature: float = 0.8,
+    top_p: float = 0.95
+) -> str:
+    """
+    Generate text with language encoder only (no vision).
+
+    Throughput: ~45 tokens/second
+    """
+    # Tokenize prompt
+    input_ids = model.tokenizer.encode(prompt)
+
+    # Encode with language encoder
+    language_emb = model.language_encoder(input_ids)
+
+    # Generate autoregressively
+    generated_ids = model.autoregressive_head.generate(
+        context=language_emb,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        top_p=top_p
+    )
+
+    # Decode
+    return model.tokenizer.decode(generated_ids)
+```
+
+### 2.2 Vision + Text Inference
+
+```python
+def generate_multimodal(
+    model,
+    image: Image,
+    prompt: str,
+    max_tokens: int = 512,
+    temperature: float = 0.8,
+    top_p: float = 0.95
+) -> str:
+    """
+    Generate text with vision + language input.
+
+    Throughput: ~28 tokens/second
+    First token latency: ~57 ms (vision encode + first step)
+    """
+    # Process image
+    vision_input = model.image_processor.process(image)
+
+    # Encode with vision encoder
+    vision_emb = model.vision_encoder(vision_input)  # ~22 ms
+
+    # Tokenize prompt
+    input_ids = model.tokenizer.encode(prompt)
+
+    # Encode with language encoder
+    language_emb = model.language_encoder(input_ids)  # ~10 ms
+
+    # Cross-modal fusion
+    joint_emb = model.cross_modal_fusion(vision_emb, language_emb)  # ~8 ms
+
+    # Generate autoregressively (JEPA-guided)
+    generated_ids = model.autoregressive_head.generate(
+        context=joint_emb,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        top_p=top_p,
+        use_jepa_guidance=True
+    )
+
+    # Decode
+    return model.tokenizer.decode(generated_ids)
+```
+
+### 2.3 JEPA-Guided Generation
+
+```python
+def generate_with_jepa_guidance(
+    model,
+    joint_embeddings,
+    max_tokens: int,
+    temperature: float,
+    top_p: float
+) -> List[int]:
+    """
+    Generate tokens with JEPA embedding guidance.
+
+    JEPA embeddings provide better representations,
+    improving generation quality.
+    """
+    generated_tokens = []
+    current_emb = joint_embeddings
+
+    for step in range(max_tokens):
+        # JEPA predicts next embedding (optional guidance)
+        predicted_emb = model.jepa_head.predict(current_emb)
+
+        # Project to language dimension
+        lang_emb = model.ar_projection(predicted_emb)
+
+        # Run AR transformer
+        logits = model.autoregressive_head(lang_emb)
+
+        # Sample next token
+        next_token = sample_token(logits, temperature, top_p)
+        generated_tokens.append(next_token)
+
+        # Stop condition
+        if next_token == EOS_TOKEN:
+            break
+
+        # Update embeddings for next step
+        next_emb = model.language_encoder(next_token)
+        current_emb = torch.cat([current_emb, next_emb], dim=0)
+
+        # Update KV cache
+        model.autoregressive_head.update_kv_cache(next_emb)
+
+    return generated_tokens
+```
+
+---
+
+## 3. Sampling Strategies
+
+### 3.1 Temperature Sampling
 
 ```cpp
 class Sampler {
@@ -52,6 +189,7 @@ public:
         TEMPERATURE,  // Sample with temperature
         TOP_P,        // Nucleus sampling
         TOP_K,        // Sample from top K
+        BEAM_SEARCH,  // Beam search decoding
     };
 
     Sampler(Strategy strategy = TEMPERATURE, float temperature = 0.8f)
@@ -71,6 +209,8 @@ public:
                 return sample_top_p(logits, vocab_size, 0.9f, rng);
             case TOP_K:
                 return sample_top_k(logits, vocab_size, 50, rng);
+            case BEAM_SEARCH:
+                return sample_beam_search(logits, vocab_size);
             default:
                 return sample_greedy(logits, vocab_size);
         }
@@ -78,119 +218,55 @@ public:
 
 private:
     int sample_greedy(const float* logits, int vocab_size) {
-        // Return argmax
-        int max_idx = 0;
-        float max_val = logits[0];
-
-        for (int i = 1; i < vocab_size; i++) {
-            if (logits[i] > max_val) {
-                max_val = logits[i];
-                max_idx = i;
-            }
-        }
-
-        return max_idx;
+        return std::max_element(logits, logits + vocab_size) - logits;
     }
 
-    int sample_temperature(
-        const float* logits,
-        int vocab_size,
-        float temperature,
-        std::mt19937& rng
-    ) {
-        // Apply temperature
+    int sample_temperature(const float* logits, int vocab_size,
+                          float temp, std::mt19937& rng) {
+        // Apply temperature scaling
         std::vector<float> scaled_logits(vocab_size);
-
         for (int i = 0; i < vocab_size; i++) {
-            scaled_logits[i] = logits[i] / temperature;
+            scaled_logits[i] = logits[i] / temp;
         }
 
-        // Compute softmax
+        // Softmax
         std::vector<float> probs = softmax(scaled_logits);
 
-        // Sample from categorical distribution
+        // Sample from distribution
         std::discrete_distribution<int> dist(probs.begin(), probs.end());
         return dist(rng);
     }
 
-    int sample_top_p(
-        const float* logits,
-        int vocab_size,
-        float p,
-        std::mt19937& rng
-    ) {
-        // Sort logits in descending order
-        std::vector<std::pair<float, int>> sorted(vocab_size);
+    int sample_top_p(const float* logits, int vocab_size,
+                     float p, std::mt19937& rng) {
+        // Sort by logit value
+        std::vector<int> indices(vocab_size);
+        std::iota(indices.begin(), indices.end(), 0);
+        std::sort(indices.begin(), indices.end(),
+                  [logits](int a, int b) { return logits[a] > logits[b]; });
 
-        for (int i = 0; i < vocab_size; i++) {
-            sorted[i] = {logits[i], i};
-        }
-
-        std::sort(sorted.begin(), sorted.end(), std::greater<std::pair<float, int>>());
-
-        // Compute cumulative probabilities
-        std::vector<float> probs = softmax_logits(sorted);
-
+        // Find smallest set with cumulative probability >= p
+        std::vector<float> sorted_probs(vocab_size);
         float cumsum = 0.0f;
-        int cutoff = vocab_size;
-
+        int k = 0;
         for (int i = 0; i < vocab_size; i++) {
-            cumsum += probs[i];
-
+            sorted_probs[i] = std::exp(logits[indices[i]]);
+            cumsum += sorted_probs[i];
             if (cumsum >= p) {
-                cutoff = i + 1;
+                k = i + 1;
                 break;
             }
         }
 
-        // Sample from top-p tokens
-        std::vector<float> top_p_probs(probs.begin(), probs.begin() + cutoff);
-        std::discrete_distribution<int> dist(top_p_probs.begin(), top_p_probs.end());
-
-        int idx = dist(rng);
-        return sorted[idx].second;
-    }
-
-    std::vector<float> softmax_logits(const std::vector<std::pair<float, int>>& sorted) {
-        // Find max for numerical stability
-        float max_logit = sorted[0].first;
-
-        // Compute exp and sum
-        std::vector<float> exp_logits(sorted.size());
-        float sum_exp = 0.0f;
-
-        for (size_t i = 0; i < sorted.size(); i++) {
-            exp_logits[i] = exp(sorted[i].first - max_logit);
-            sum_exp += exp_logits[i];
+        // Normalize and sample from top-k
+        sorted_probs.resize(k);
+        for (int i = 0; i < k; i++) {
+            sorted_probs[i] /= cumsum;
         }
 
-        // Normalize
-        for (size_t i = 0; i < sorted.size(); i++) {
-            exp_logits[i] /= sum_exp;
-        }
-
-        return exp_logits;
-    }
-
-    std::vector<float> softmax(const std::vector<float>& logits) {
-        // Find max for numerical stability
-        float max_logit = *std::max_element(logits.begin(), logits.end());
-
-        // Compute exp and sum
-        std::vector<float> exp_logits(logits.size());
-        float sum_exp = 0.0f;
-
-        for (size_t i = 0; i < logits.size(); i++) {
-            exp_logits[i] = exp(logits[i] - max_logit);
-            sum_exp += exp_logits[i];
-        }
-
-        // Normalize
-        for (size_t i = 0; i < logits.size(); i++) {
-            exp_logits[i] /= sum_exp;
-        }
-
-        return exp_logits;
+        std::discrete_distribution<int> dist(sorted_probs.begin(), sorted_probs.end());
+        int sampled_idx = dist(rng);
+        return indices[sampled_idx];
     }
 
     Strategy strategy_;
@@ -198,898 +274,309 @@ private:
 };
 ```
 
-### 2.2 Repetition Penalty
+### 3.2 Beam Search
 
 ```cpp
-class RepetitionPenalty {
+class BeamSearch {
 public:
-    RepetitionPenalty(float penalty = 1.0f) : penalty_(penalty) {}
-
-    void apply(
-        float* logits,  // [vocab_size]
+    std::vector<int> search(
+        const float* logits,  // [seq_len, vocab_size]
+        int seq_len,
         int vocab_size,
-        const std::vector<int>& generated_tokens
+        int beam_width = 4,
+        int max_tokens = 100
     ) {
-        if (penalty_ == 1.0f) {
-            return;
+        // Initialize beams with top-k tokens from first position
+        std::vector<Beam> beams;
+        for (int i = 0; i < beam_width; i++) {
+            beams.push_back({
+                {argmax(&logits[i * vocab_size], vocab_size)},
+                logits[i * vocab_size + beams.back().tokens.back()]
+            });
         }
 
-        // Count token frequencies
-        std::unordered_map<int, int> freq;
-        for (int token : generated_tokens) {
-            freq[token]++;
-        }
+        // Generate autoregressively
+        for (int step = 1; step < max_tokens; step++) {
+            std::vector<Beam> new_beams;
 
-        // Apply penalty
-        for (const auto& [token, count] : freq) {
-            if (token < vocab_size) {
-                if (logits[token] > 0) {
-                    logits[token] /= penalty_;
-                } else {
-                    logits[token] *= penalty_;
+            for (const auto& beam : beams) {
+                // Get logits for last token
+                // ... (would need model forward pass here)
+
+                // Expand with top-k candidates
+                for (int k = 0; k < beam_width; k++) {
+                    Beam new_beam = beam;
+                    new_beam.tokens.push_back(candidate_token);
+                    new_beam.score += candidate_score;
+                    new_beams.push_back(new_beam);
                 }
             }
-        }
-    }
 
-private:
-    float penalty_;
-};
-```
-
----
-
-## 3. Text Generation
-
-### 3.1 Generation Loop
-
-```cpp
-class TextGenerator {
-public:
-    TextGenerator(
-        CromwellModel* model,
-        Tokenizer* tokenizer,
-        const Sampler& sampler
-    ) : model_(model), tokenizer_(tokenizer), sampler_(sampler) {}
-
-    struct GenerationConfig {
-        int max_tokens = 1000;
-        float temperature = 0.8f;
-        float top_p = 0.9f;
-        float repetition_penalty = 1.0f;
-        std::vector<int> stop_tokens;
-        bool echo_prompt = false;
-    };
-
-    std::string generate(
-        const std::string& prompt,
-        const GenerationConfig& config
-    ) {
-        // Encode prompt
-        std::vector<int> input_ids = tokenizer_->encode(prompt);
-
-        // Initialize KV cache
-        model_->clear_kv_cache();
-
-        // Process prompt
-        std::vector<int> output_ids;
-
-        if (config.echo_prompt) {
-            output_ids = input_ids;
-        } else {
-            // Only process prompt through model (no generation yet)
-            std::vector<float> logits;
-            model_->forward({input_ids.data()}, {static_cast<int>(input_ids.size())}, 1, logits);
-        }
-
-        // Generate tokens autoregressively
-        std::mt19937 rng(std::random_device{}());
-        RepetitionPenalty rep_penalty(config.repetition_penalty);
-
-        for (int step = 0; step < config.max_tokens; step++) {
-            // Get logits for last token
-            std::vector<float> logits;
-            model_->forward(
-                {&output_ids.back()},
-                {1},
-                1,
-                logits
+            // Keep top-k beams
+            std::partial_sort(
+                new_beams.begin(),
+                new_beams.begin() + beam_width,
+                new_beams.end(),
+                [](const Beam& a, const Beam& b) { return a.score > b.score; }
             );
-
-            // Apply repetition penalty
-            rep_penalty.apply(logits.data(), logits.size(), output_ids);
-
-            // Sample next token
-            int next_token = sampler_.sample(logits.data(), logits.size(), rng);
-            output_ids.push_back(next_token);
-
-            // Check for stop tokens
-            if (std::find(config.stop_tokens.begin(), config.stop_tokens.end(), next_token)
-                != config.stop_tokens.end()) {
-                break;
-            }
+            beams = std::vector<Beam>(new_beams.begin(), new_beams.begin() + beam_width);
         }
 
-        // Decode output
-        std::string output = tokenizer_->decode(output_ids);
-
-        return output;
+        // Return best beam
+        return std::max_element(beams.begin(), beams.end())->tokens;
     }
 
 private:
-    CromwellModel* model_;
-    Tokenizer* tokenizer_;
-    Sampler sampler_;
-};
-```
-
-### 3.2 Streaming Generation
-
-```cpp
-class StreamingGenerator {
-public:
-    using TokenCallback = std::function<void(int token, const std::string& text)>;
-
-    std::string generate_streaming(
-        const std::string& prompt,
-        const GenerationConfig& config,
-        TokenCallback callback
-    ) {
-        std::vector<int> input_ids = tokenizer_->encode(prompt);
-
-        model_->clear_kv_cache();
-
-        // Process prompt
-        std::vector<float> logits;
-        model_->forward({input_ids.data()}, {static_cast<int>(input_ids.size())}, 1, logits);
-
-        std::vector<int> output_ids;
-
-        // Generate tokens
-        std::mt19937 rng(std::random_device{}());
-
-        for (int step = 0; step < config.max_tokens; step++) {
-            // Get next token
-            model_->forward({&input_ids.back()}, {1}, 1, logits);
-
-            int next_token = sampler_.sample(logits.data(), logits.size(), rng);
-            output_ids.push_back(next_token);
-
-            // Decode and callback
-            std::string text = tokenizer_->decode(output_ids);
-            callback(next_token, text);
-
-            // Check stop tokens
-            if (std::find(config.stop_tokens.begin(), config.stop_tokens.end(), next_token)
-                != config.stop_tokens.end()) {
-                break;
-            }
-        }
-
-        return tokenizer_->decode(output_ids);
-    }
+    struct Beam {
+        std::vector<int> tokens;
+        float score;
+    };
 };
 ```
 
 ---
 
-## 4. Code Editing
+## 4. KV Cache for Efficient Inference
 
-### 4.1 Context Manager
-
-```cpp
-class ContextManager {
-public:
-    struct ContextConfig {
-        int max_tokens = 4096;
-        int max_files = 10;
-        float file_relevance_threshold = 0.1f;
-    };
-
-    std::vector<FileInfo> select_context(
-        const std::string& target_file,
-        const std::vector<FileInfo>& codebase,
-        const ContextConfig& config
-    ) {
-        // Score files by relevance
-        std::vector<std::pair<float, FileInfo>> scored_files;
-
-        for (const auto& file : codebase) {
-            float score = compute_relevance(target_file, file);
-            scored_files.push_back({score, file});
-        }
-
-        // Sort by relevance
-        std::sort(scored_files.begin(), scored_files.end(),
-                  [](const auto& a, const auto& b) {
-                      return a.first > b.first;
-                  });
-
-        // Select top files until budget exhausted
-        std::vector<FileInfo> selected;
-        int used_tokens = 0;
-
-        for (const auto& [score, file] : scored_files) {
-            if (score < config.file_relevance_threshold) {
-                continue;
-            }
-
-            if (used_tokens + file.token_count > config.max_tokens) {
-                continue;
-            }
-
-            selected.push_back(file);
-            used_tokens += file.token_count;
-
-            if (selected.size() >= config.max_files) {
-                break;
-            }
-        }
-
-        return selected;
-    }
-
-private:
-    float compute_relevance(
-        const std::string& target_file,
-        const FileInfo& file
-    ) {
-        float score = 0.0f;
-
-        // File type bonus
-        if (has_common_extension(file.path, target_file.path)) {
-            score += 1.0f;
-        }
-
-        // Import relationship
-        if (imports(file.path, target_file.path) ||
-            imports(target_file.path, file.path)) {
-            score += 2.0f;
-        }
-
-        // Symbol overlap
-        int shared_symbols = count_shared_symbols(file.symbols, target_file.symbols);
-        score += shared_symbols * 0.1f;
-
-        // Directory proximity
-        if (same_directory(file.path, target_file.path)) {
-            score += 0.5f;
-        }
-
-        return score;
-    }
-
-    struct FileInfo {
-        std::string path;
-        std::string content;
-        int token_count;
-        std::unordered_set<std::string> symbols;
-        std::unordered_set<std::string> imports;
-    };
-};
-```
-
-### 4.2 Diff Generation
+### 4.1 KV Cache Structure
 
 ```cpp
-class DiffGenerator {
-public:
-    struct Diff {
-        std::string old_path;
-        std::string new_path;
-        std::string unified_diff;
-    };
+// KV cache for fast autoregressive generation
+struct KVCache {
+    float* k_cache;     // [max_seq_len, num_kv_heads, head_dim]
+    float* v_cache;     // [max_seq_len, num_kv_heads, head_dim]
+    int current_len;
+    int max_len;
+    int num_kv_heads;   // 3 for MQA
+    int head_dim;       // 64
 
-    Diff generate_diff(
-        const std::string& old_content,
-        const std::string& new_content,
-        const std::string& file_path
-    ) {
-        // Split into lines
-        std::vector<std::string> old_lines = split_lines(old_content);
-        std::vector<std::string> new_lines = split_lines(new_content);
-
-        // Compute edit script using Myers diff algorithm
-        auto edit_script = compute_myers_diff(old_lines, new_lines);
-
-        // Generate unified diff
-        std::string diff = format_unified_diff(
-            old_lines,
-            new_lines,
-            edit_script,
-            file_path
-        );
-
-        return {file_path, file_path, diff};
+    void resize(int max_seq_len) {
+        max_len = max_seq_len;
+        k_cache = new float[max_len * num_kv_heads * head_dim];
+        v_cache = new float[max_len * num_kv_heads * head_dim];
     }
 
-private:
-    struct EditOp {
-        enum Type { INSERT, DELETE, REPLACE, EQUAL };
-
-        Type type;
-        int old_start;
-        int old_end;
-        int new_start;
-        int new_end;
-    };
-
-    std::vector<EditOp> compute_myers_diff(
-        const std::vector<std::string>& old_lines,
-        const std::vector<std::string>& new_lines
-    ) {
-        // Myers diff algorithm
-        // (Implementation simplified for brevity)
-
-        int N = old_lines.size();
-        int M = new_lines.size();
-
-        // Maximum possible edit distance
-        int MAX = N + M;
-
-        // Trace of furthest reaching D-paths
-        std::vector<std::unordered_map<int, int>> V(2 * MAX + 1);
-
-        V[1][1] = 0;
-
-        for (int D = 0; D <= MAX; D++) {
-            for (int k = -D; k <= D; k += 2) {
-                // Determine whether to move down or right
-                bool down = (k == -D || (k != D && V[k - 1] < V[k + 1]));
-
-                int x, y;
-                if (down) {
-                    x = V[k + 1];
-                    y = x - k - 1;
-                } else {
-                    x = V[k - 1] + 1;
-                    y = x - k;
-                }
-
-                // Snake as far as possible
-                while (x < N && y < M && old_lines[x] == new_lines[y]) {
-                    x++;
-                    y++;
-                }
-
-                V[k] = x;
-
-                // Check if we reached the end
-                if (x == N && y == M) {
-                    // Backtrack to find edit script
-                    return backtrack(V, k, D, old_lines, new_lines);
-                }
-            }
-        }
-
-        // Should not reach here
-        return {};
+    void append(const float* new_k, const float* new_v) {
+        // Append new key/value at current position
+        int offset = current_len * num_kv_heads * head_dim;
+        std::copy(new_k, new_k + num_kv_heads * head_dim, &k_cache[offset]);
+        std::copy(new_v, new_v + num_kv_heads * head_dim, &v_cache[offset]);
+        current_len++;
     }
 
-    std::vector<EditOp> backtrack(
-        const std::vector<std::unordered_map<int, int>>& V,
-        int k,
-        int D,
-        const std::vector<std::string>& old_lines,
-        const std::vector<std::string>& new_lines
-    ) {
-        std::vector<EditOp> ops;
-
-        int x = old_lines.size();
-        int y = new_lines.size();
-
-        for (int d = D; d > 0; d--) {
-            bool down = (k == -d || (k != d && V[k - 1 + d] < V[k + 1 + d]));
-
-            int prev_k, prev_x, prev_y;
-            if (down) {
-                prev_k = k + 1;
-                prev_x = V[prev_k + d];
-                prev_y = prev_x - prev_k - 1;
-            } else {
-                prev_k = k - 1;
-                prev_x = V[prev_k + d] - 1;
-                prev_y = prev_x - prev_k;
-            }
-
-            // Check if this was a snake
-            while (prev_x > 0 && prev_y > 0 &&
-                   old_lines[prev_x - 1] == new_lines[prev_y - 1]) {
-                prev_x--;
-                prev_y--;
-            }
-
-            // Determine edit operation
-            EditOp op;
-            if (prev_x == x && prev_y == y - 1) {
-                op.type = EditOp::INSERT;
-                op.new_start = prev_y;
-                op.new_end = y;
-            } else if (prev_x == x - 1 && prev_y == y) {
-                op.type = EditOp::DELETE;
-                op.old_start = prev_x;
-                op.old_end = x;
-            } else if (prev_x == x - 1 && prev_y == y - 1) {
-                op.type = EditOp::REPLACE;
-                op.old_start = prev_x;
-                op.old_end = x;
-                op.new_start = prev_y;
-                op.new_end = y;
-            } else {
-                op.type = EditOp::EQUAL;
-                op.old_start = prev_x;
-                op.old_end = x;
-                op.new_start = prev_y;
-                op.new_end = y;
-            }
-
-            ops.push_back(op);
-
-            x = prev_x;
-            y = prev_y;
-            k = prev_k;
-        }
-
-        std::reverse(ops.begin(), ops.end());
-        return ops;
-    }
-
-    std::string format_unified_diff(
-        const std::vector<std::string>& old_lines,
-        const std::vector<std::string>& new_lines,
-        const std::vector<EditOp>& ops,
-        const std::string& file_path
-    ) {
-        std::ostringstream diff;
-
-        diff << "--- a/" << file_path << "\n";
-        diff << "+++ b/" << file_path << "\n";
-
-        for (const auto& op : ops) {
-            if (op.type == EditOp::EQUAL) {
-                continue;
-            }
-
-            diff << "@@ -" << op.old_start + 1 << "," << op.old_end - op.old_start
-                 << " +" << op.new_start + 1 << "," << op.new_end - op.new_start
-                 << " @@\n";
-
-            // Print old lines (with -)
-            for (int i = op.old_start; i < op.old_end; i++) {
-                diff << "-" << old_lines[i] << "\n";
-            }
-
-            // Print new lines (with +)
-            for (int i = op.new_start; i < op.new_end; i++) {
-                diff << "+" << new_lines[i] << "\n";
-            }
-        }
-
-        return diff.str();
-    }
-
-    std::vector<std::string> split_lines(const std::string& text) {
-        std::vector<std::string> lines;
-        std::istringstream iss(text);
-        std::string line;
-
-        while (std::getline(iss, line)) {
-            lines.push_back(line);
-        }
-
-        return lines;
+    void reset() {
+        current_len = 0;
     }
 };
 ```
 
-### 4.3 Diff Application
+### 4.2 Cached Attention
 
 ```cpp
-class DiffApplier {
-public:
-    std::string apply_diff(
-        const std::string& original_content,
-        const DiffGenerator::Diff& diff
-    ) {
-        // Parse unified diff
-        auto hunks = parse_unified_diff(diff.unified_diff);
+// Attention computation with KV cache
+void cached_attention(
+    const float* query,     // [1, num_q_heads, head_dim] - single token
+    const KVCache& cache,   // Contains K, V from previous tokens
+    float* output,          // [1, num_q_heads, head_dim]
+    int num_q_heads,
+    int head_dim
+) {
+    int seq_len = cache.current_len;
 
-        // Apply each hunk
-        std::vector<std::string> lines = split_lines(original_content);
-
-        int line_offset = 0;
-
-        for (const auto& hunk : hunks) {
-            // Validate hunk
-            if (!validate_hunk(lines, hunk, line_offset)) {
-                throw std::runtime_error("Failed to apply diff: hunk validation failed");
-            }
-
-            // Apply hunk
-            apply_hunk(lines, hunk, line_offset);
-
-            // Update offset
-            line_offset += hunk.new_lines.size() - hunk.old_lines.size();
-        }
-
-        // Rejoin lines
-        return join_lines(lines);
-    }
-
-private:
-    struct Hunk {
-        int old_start;
-        int old_count;
-        int new_start;
-        int new_count;
-        std::vector<std::string> old_lines;
-        std::vector<std::string> new_lines;
-    };
-
-    std::vector<Hunk> parse_unified_diff(const std::string& diff) {
-        std::vector<Hunk> hunks;
-        std::istringstream iss(diff);
-        std::string line;
-
-        while (std::getline(iss, line)) {
-            if (line.substr(0, 2) == "@@") {
-                Hunk hunk;
-
-                // Parse: @@ -old_start,old_count +new_start,new_count @@
-                sscanf(line.c_str(), "@@ -%d,%d +%d,%d @",
-                       &hunk.old_start, &hunk.old_count,
-                       &hunk.new_start, &hunk.new_count);
-
-                hunk.old_start--;  // Convert to 0-indexed
-
-                // Read hunk lines
-                while (std::getline(iss, line)) {
-                    if (line.empty() || line[0] == '@') {
-                        break;
-                    }
-
-                    if (line[0] == '-') {
-                        hunk.old_lines.push_back(line.substr(1));
-                    } else if (line[0] == '+') {
-                        hunk.new_lines.push_back(line.substr(1));
-                    } else if (line[0] == ' ') {
-                        hunk.old_lines.push_back(line.substr(1));
-                        hunk.new_lines.push_back(line.substr(1));
-                    }
+    for (int h = 0; h < num_q_heads; h++) {
+        for (int kv_h = 0; kv_h < cache.num_kv_heads; kv_h++) {
+            // Compute attention scores for this token vs all previous tokens
+            for (int t = 0; t < seq_len; t++) {
+                float score = 0.0f;
+                for (int d = 0; d < head_dim; d++) {
+                    score += query[h * head_dim + d] *
+                             cache.k_cache[t * cache.num_kv_heads * cache.head_dim +
+                                           kv_h * cache.head_dim + d];
                 }
 
-                hunks.push_back(hunk);
+                // Apply softmax (accumulate across all previous tokens)
+                // ...
+            }
+
+            // Weighted sum of values
+            for (int d = 0; d < head_dim; d++) {
+                output[h * head_dim + d] = /* weighted sum */;
             }
         }
-
-        return hunks;
     }
+}
+```
 
-    bool validate_hunk(
-        const std::vector<std::string>& lines,
-        const Hunk& hunk,
-        int offset
-    ) {
-        int actual_start = hunk.old_start + offset;
+---
 
-        if (actual_start + hunk.old_count > lines.size()) {
+## 5. Diff Generation
+
+### 5.1 Unified Diff Format
+
+```python
+def generate_diff(
+    original_code: str,
+    edited_code: str,
+    file_path: str
+) -> str:
+    """
+    Generate unified diff between original and edited code.
+
+    Uses Myers diff algorithm optimized for code.
+    """
+    import difflib
+
+    # Split into lines
+    original_lines = original_code.splitlines(keepends=True)
+    edited_lines = edited_code.splitlines(keepends=True)
+
+    # Generate diff
+    diff = difflib.unified_diff(
+        original_lines,
+        edited_lines,
+        fromfile=f"a/{file_path}",
+        tofile=f"b/{file_path}",
+        lineterm=''
+    )
+
+    return ''.join(diff)
+```
+
+### 5.2 Diff Application
+
+```cpp
+// Apply unified diff safely
+bool apply_diff(
+    const std::string& file_path,
+    const std::string& diff_content
+) {
+    // Parse diff
+    auto changes = parse_unified_diff(diff_content);
+
+    // Read original file
+    std::string original = read_file(file_path);
+    auto lines = split_lines(original);
+
+    // Apply changes in reverse order (to preserve line numbers)
+    for (auto it = changes.rbegin(); it != changes.rend(); ++it) {
+        if (!apply_change(lines, *it)) {
             return false;
         }
-
-        // Check that old lines match
-        for (size_t i = 0; i < hunk.old_lines.size(); i++) {
-            if (lines[actual_start + i] != hunk.old_lines[i]) {
-                return false;
-            }
-        }
-
-        return true;
     }
 
-    void apply_hunk(
-        std::vector<std::string>& lines,
-        const Hunk& hunk,
-        int offset
-    ) {
-        int actual_start = hunk.old_start + offset;
+    // Write modified file
+    write_file(file_path, join_lines(lines));
+    return true;
+}
 
-        // Remove old lines
-        lines.erase(
-            lines.begin() + actual_start,
-            lines.begin() + actual_start + hunk.old_count
-        );
+// Safe file writing (atomic operation)
+bool write_file_safely(
+    const std::string& path,
+    const std::string& content
+) {
+    // Write to temporary file
+    std::string temp_path = path + ".tmp";
+    std::ofstream out(temp_path);
+    out << content;
+    out.close();
 
-        // Insert new lines
-        lines.insert(
-            lines.begin() + actual_start,
-            hunk.new_lines.begin(),
-            hunk.new_lines.end()
-        );
-    }
-
-    std::string join_lines(const std::vector<std::string>& lines) {
-        std::ostringstream oss;
-
-        for (size_t i = 0; i < lines.size(); i++) {
-            oss << lines[i];
-
-            if (i < lines.size() - 1) {
-                oss << "\n";
-            }
-        }
-
-        return oss.str();
-    }
-
-    std::vector<std::string> split_lines(const std::string& text) {
-        std::vector<std::string> lines;
-        std::istringstream iss(text);
-        std::string line;
-
-        while (std::getline(iss, line)) {
-            lines.push_back(line);
-        }
-
-        return lines;
-    }
-};
+    // Atomic rename
+    return std::rename(temp_path.c_str(), path.c_str()) == 0;
+}
 ```
 
 ---
 
-## 5. High-Level API
+## 6. Performance Targets
 
-### 5.1 Code Editing Interface
+### 6.1 Latency Breakdown
 
-```cpp
-class CodeEditor {
-public:
-    CodeEditor(
-        CromwellModel* model,
-        Tokenizer* tokenizer,
-        const std::string& codebase_path
-    ) : model_(model),
-        tokenizer_(tokenizer),
-        codebase_path_(codebase_path) {
-        // Index codebase
-        index_codebase();
-    }
+**Text-only generation (45 tok/s):**
+- Language encode (4096 tokens): ~22 ms
+- Per token generation: ~22 ms
+  - AR transformer (6 layers): ~12 ms
+  - Sampling: ~2 ms
+  - KV cache update: ~2 ms
+  - Other overhead: ~6 ms
 
-    struct EditRequest {
-        std::string file_path;
-        std::string instruction;
-        int max_context_tokens = 4096;
-        int max_output_tokens = 1000;
-    };
+**Vision + text generation (28 tok/s):**
+- Vision encode (256×256 image): ~22 ms (one-time)
+- Language encode (4096 tokens): ~10 ms
+- Cross-modal fusion: ~8 ms
+- Per token generation: ~35 ms
+  - JEPA prediction: ~3 ms
+  - AR transformer (6 layers): ~15 ms
+  - Sampling: ~2 ms
+  - KV cache update: ~2 ms
+  - Other overhead: ~13 ms
 
-    struct EditResult {
-        bool success;
-        std::string edited_content;
-        std::string diff;
-        std::string error_message;
-    };
+### 6.2 Memory Usage
 
-    EditResult edit(const EditRequest& request) {
-        try {
-            // 1. Load file
-            std::string file_content = load_file(request.file_path);
+| Component | Memory (batch=1) |
+|-----------|------------------|
+| Model weights (300M) | 1.2 GB |
+| Vision activations | 100 MB |
+| Language activations | 150 MB |
+| KV cache (4096 context) | 48 MB |
+| **Total** | **~1.5 GB** |
 
-            // 2. Select context
-            auto context = select_context(request.file_path, request.max_context_tokens);
+---
 
-            // 3. Create prompt
-            std::string prompt = create_prompt(
-                file_content,
-                request.instruction,
-                context
-            );
+## 7. Multimodal Examples
 
-            // 4. Generate edit
-            TextGenerator::GenerationConfig gen_config;
-            gen_config.max_tokens = request.max_output_tokens;
-            gen_config.temperature = 0.3f;  // Lower temperature for edits
-            gen_config.stop_tokens = {
-                tokenizer_->special_tokens().at("<EDIT_END>"),
-                tokenizer_->special_tokens().at("</FILE>"),
-            };
+### 7.1 Image-to-Code Generation
 
-            TextGenerator generator(model_, tokenizer_, Sampler(Sampler::TEMPERATURE, 0.3f));
-            std::string output = generator.generate(prompt, gen_config);
+```python
+# Example: Generate plotting code from chart
+image = load_image("chart.png")
 
-            // 5. Parse output
-            auto edit_result = parse_edit_output(output);
+prompt = """<IMAGE>
+Generate matplotlib code to recreate this chart.
+The chart shows a line plot with two series."""
 
-            // 6. Generate diff
-            DiffGenerator diff_gen;
-            auto diff = diff_gen.generate_diff(file_content, edit_result.edited_content, request.file_path);
+result = generate_multimodal(
+    model=model,
+    image=image,
+    prompt=prompt,
+    max_tokens=256
+)
 
-            // 7. Apply diff (with validation)
-            DiffApplier diff_applier;
-            std::string edited_content = diff_applier.apply_diff(file_content, diff);
+# Output might be:
+# import matplotlib.pyplot as plt
+# import numpy as np
+#
+# x = np.linspace(0, 10, 100)
+# y1 = np.sin(x)
+# y2 = np.cos(x)
+#
+# plt.figure(figsize=(10, 6))
+# plt.plot(x, y1, label='sin(x)')
+# plt.plot(x, y2, label='cos(x)')
+# plt.xlabel('x')
+# plt.ylabel('y')
+# plt.legend()
+# plt.grid(True)
+# plt.show()
+```
 
-            // 8. Validate syntax (if applicable)
-            if (!validate_syntax(edited_content, get_file_extension(request.file_path))) {
-                return {
-                    false,
-                    "",
-                    diff.unified_diff,
-                    "Generated code has syntax errors"
-                };
-            }
+### 7.2 Code Screenshot to Source
 
-            return {
-                true,
-                edited_content,
-                diff.unified_diff,
-                ""
-            };
+```python
+# Example: Extract code from screenshot
+image = load_image("screenshot.png")
 
-        } catch (const std::exception& e) {
-            return {
-                false,
-                "",
-                "",
-                e.what()
-            };
-        }
-    }
+prompt = """<IMAGE>
+Extract the Python code from this syntax-highlighted screenshot."""
 
-private:
-    void index_codebase() {
-        // Scan codebase directory
-        for (const auto& entry : std::filesystem::recursive_directory_iterator(codebase_path_)) {
-            if (entry.is_regular_file()) {
-                std::string path = entry.path().string();
-                std::string content = load_file(path);
-
-                FileInfo info;
-                info.path = path;
-                info.content = content;
-                info.token_count = tokenizer_->encode(content).size();
-                info.symbols = extract_symbols(content);
-                info.imports = extract_imports(content);
-
-                codebase_.push_back(info);
-            }
-        }
-    }
-
-    std::vector<FileInfo> select_context(
-        const std::string& target_file,
-        int max_tokens
-    ) {
-        ContextManager ctx_mgr;
-        ContextManager::ContextConfig config;
-        config.max_tokens = max_tokens;
-
-        return ctx_mgr.select_context(target_file, codebase_, config);
-    }
-
-    std::string create_prompt(
-        const std::string& file_content,
-        const std::string& instruction,
-        const std::vector<FileInfo>& context
-    ) {
-        std::ostringstream prompt;
-
-        // Add context files
-        for (const auto& file : context) {
-            prompt << "<FILE=" << file.path << ">\n";
-            prompt << file.content << "\n";
-            prompt << "</FILE>\n";
-        }
-
-        // Add target file
-        prompt << "<FILE=" << "TARGET" << ">\n";
-        prompt << file_content << "\n";
-        prompt << "</FILE>\n";
-
-        // Add instruction
-        prompt << "<EDIT_START>\n";
-        prompt << instruction << "\n";
-        prompt << "<EDIT_END>\n";
-
-        return prompt.str();
-    }
-
-    CromwellModel* model_;
-    Tokenizer* tokenizer_;
-    std::string codebase_path_;
-    std::vector<FileInfo> codebase_;
-};
+result = generate_multimodal(
+    model=model,
+    image=image,
+    prompt=prompt,
+    max_tokens=512
+)
 ```
 
 ---
 
-## 6. Performance Optimization
-
-### 6.1 KV Cache Management
-
-```cpp
-class KVCacheManager {
-public:
-    KVCacheManager(int max_cache_size = 100)
-        : max_cache_size_(max_cache_size) {}
-
-    void get_or_create_cache(
-        const std::string& key,
-        int num_layers,
-        int max_seq_len,
-        int num_kv_heads,
-        int head_dim,
-        KVCache*& cache
-    ) {
-        // Check LRU cache
-        auto it = cache_map_.find(key);
-
-        if (it != cache_map_.end()) {
-            // Move to front (most recently used)
-            cache_list_.splice(cache_list_.begin(), cache_list_, it->second);
-            cache = it->second->cache.get();
-            return;
-        }
-
-        // Create new cache
-        cache = new KVCache(1, max_seq_len, num_layers, num_kv_heads, head_dim);
-
-        // Add to cache
-        auto entry = std::make_unique<CacheEntry>();
-        entry->key = key;
-        entry->cache.reset(cache);
-
-        cache_list_.push_front(std::move(entry));
-        cache_map_[key] = cache_list_.begin();
-
-        // Evict if necessary
-        while (cache_map_.size() > max_cache_size_) {
-            auto evict = cache_list_.back();
-            cache_map_.erase(evict->key);
-            cache_list_.pop_back();
-        }
-    }
-
-    void clear() {
-        cache_list_.clear();
-        cache_map_.clear();
-    }
-
-private:
-    struct CacheEntry {
-        std::string key;
-        std::unique_ptr<KVCache> cache;
-    };
-
-    int max_cache_size_;
-    std::list<std::unique_ptr<CacheEntry>> cache_list_;
-    std::unordered_map<std::string, std::list<std::unique_ptr<CacheEntry>>::iterator> cache_map_;
-};
-```
-
----
-
-## 7. Error Handling
-
-```cpp
-class CodeEditorException : public std::runtime_error {
-public:
-    CodeEditorException(const std::string& message)
-        : std::runtime_error(message) {}
-};
-
-class ValidationException : public CodeEditorException {
-public:
-    ValidationException(const std::string& message)
-        : CodeEditorException("Validation failed: " + message) {}
-};
-
-class DiffException : public CodeEditorException {
-public:
-    DiffException(const std::string& message)
-        : CodeEditorException("Diff error: " + message) {}
-};
-```
-
----
-
-**Document Status**: Complete
-**Next**: Core Implementation Code Samples
+**Document Status**: Updated for VL-JEPA multimodal inference
+**Next Document**: 06_IMPLEMENTATION_ROADMAP.md

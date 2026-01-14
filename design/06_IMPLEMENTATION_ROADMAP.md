@@ -1,32 +1,31 @@
-# Cromwell Agent: Implementation Roadmap
-## Step-by-Step Guide to Building the Auto-Regressive Coding Agent
+# Cromwell VL-JEPA: Implementation Roadmap
+## Step-by-Step Guide to Building the Vision-Language JEPA Coding Agent
 
-**Version**: 1.0
+**Version**: 2.0
 **Date**: 2025-01-14
 
 ---
 
 ## Overview
 
-This roadmap provides a complete implementation plan for building Cromwell Agent from scratch. Follow these phases sequentially, testing thoroughly at each stage.
+This roadmap provides a complete implementation plan for building Cromwell VL-JEPA from scratch. Follow these phases sequentially, testing thoroughly at each stage.
 
-**Total Estimated Time**: 20 weeks (5 months)
+**Total Estimated Time**: 24 weeks (6 months)
 
-**Difficulty**: Advanced (requires C++, Python, ML knowledge)
+**Difficulty**: Advanced (requires C++, Python, ML, Vision knowledge)
 
 ---
 
-## Phase 1: Foundation (Weeks 1-2)
+## Phase 1: Foundation & Vision Encoder (Weeks 1-4)
 
-**Goal**: Set up build system and basic operations
+**Goal**: Implement vision encoder with AVX2 optimization
 
 ### Tasks
 
 #### 1.1 Build System Setup
-- [ ] Create CMakeLists.txt
-- [ ] Set up project structure
+- [ ] Update CMakeLists.txt with vision library
+- [ ] Add vision ops to cromwell_ops
 - [ ] Configure compiler flags (AVX2, FMA)
-- [ ] Create empty source files
 - [ ] Verify build works
 
 **Commands**:
@@ -36,776 +35,400 @@ cmake ..
 make -j$(nproc)
 ```
 
-**Expected Outcome**: Build succeeds with empty files
-
-#### 1.2 AVX2 Utility Functions
-- [ ] Implement AVX2 detection
-- [ ] Implement basic AVX2 wrappers (load, store, FMA)
-- [ ] Implement horizontal operations (sum, max)
-- [ ] Implement math functions (exp, sigmoid, tanh)
-
-**File**: `src/ops/avx2_utils.h`
-
-**Test**: Verify AVX2 detection works on your CPU
-
-#### 1.3 Basic Tensor Operations
-- [ ] Implement vector addition
-- [ ] Implement vector multiplication
-- [ ] Implement scalar multiplication
+#### 1.2 Vision Encoder Core
+- [ ] Implement patch embedding (4×4 conv)
+- [ ] Implement MBConv blocks (×4)
+- [ ] Implement projection layer (192 → 384)
+- [ ] Add positional embeddings
 - [ ] Write unit tests
 
-**File**: `src/ops/tensor_ops.h`
+**Files**: `src/core/vision_encoder.h`, `src/ops/patch_ops.h`
 
-**Test**:
-```cpp
-// Test vector addition
-float a[8] = {1, 2, 3, 4, 5, 6, 7, 8};
-float b[8] = {8, 7, 6, 5, 4, 3, 2, 1};
-float c[8];
+#### 1.3 Vision Transformer Blocks
+- [ ] Implement windowed attention (16×16)
+- [ ] Implement SwiGLU MLP
+- [ ] Add RMSNorm
+- [ ] Stack 6 ViT blocks
+- [ ] Benchmark on CPU
 
-add_vectors_avx2(a, b, c, 8);
-// c should be {9, 9, 9, 9, 9, 9, 9, 9}
-```
+**Target**: ~22 ms for 256×256 image
 
-#### 1.4 Memory Management
-- [ ] Implement aligned allocator
-- [ ] Implement memory pool
-- [ ] Write unit tests
-
-**File**: `src/ops/memory.h`
-
-**Test**: Verify memory alignment (32-byte boundaries)
+#### 1.4 AVX2 Optimization for Vision
+- [ ] Optimize patch embedding with AVX2
+- [ ] Optimize depthwise conv with AVX2
+- [ ] Optimize windowed attention with AVX2
+- [ ] Achieve 4× speedup over scalar
 
 **Success Criteria**:
-- [ ] Build completes without errors
-- [ ] AVX2 detection works correctly
-- [ ] Basic vector operations produce correct results
-- [ ] Memory is properly aligned
+- [ ] Vision encoder processes 256×256 image in < 25 ms
+- [ ] AVX2 kernels provide 4× speedup
+- [ ] All unit tests pass
 
 ---
 
-## Phase 2: Attention Mechanism (Weeks 3-4)
+## Phase 2: Language Encoder (Weeks 5-8)
 
-**Goal**: Implement multi-query attention with AVX2 optimization
-
-### Tasks
-
-#### 2.1 Matrix Multiplication (GEMM)
-- [ ] Implement 8x8 micro-kernel
-- [ ] Implement blocked GEMM (512x512 tiles)
-- [ ] Add software prefetching
-- [ ] Write benchmarks
-
-**File**: `src/ops/gemm.h`
-
-**Test**:
-```cpp
-// Test matrix multiplication
-float A[8][8] = {/* ... */};
-float B[8][8] = {/* ... */};
-float C[8][8];
-
-gemm_8x8(A, B, C, 8, 8, 8);
-// Verify C = A @ B
-```
-
-**Benchmark**: Measure GFLOP/s (target: >15 GFLOP/s)
-
-#### 2.2 QK^T Computation
-- [ ] Implement query-key dot product
-- [ ] Optimize with AVX2
-- [ ] Handle multi-query pattern
-
-**File**: `src/ops/attention_ops.h`
-
-**Test**:
-```cpp
-// Test QK^T
-float Q[10][32][64];  // 10 tokens, 32 heads, 64 dim
-float K[100][4][64];   // 100 tokens (cached), 4 KV heads, 64 dim
-float attn[10][32][100];
-
-compute_qk_attn(Q, K, attn, 10, 100, 32, 4, 64);
-// Verify attention scores
-```
-
-#### 2.3 Softmax
-- [ ] Implement in-place softmax
-- [ ] Add numerical stability (max normalization)
-- [ ] Optimize with AVX2
-
-**File**: `src/ops/attention_ops.h`
-
-**Test**:
-```cpp
-// Test softmax
-float logits[100];
-// Fill with values
-
-softmax_inplace(logits, 1, 100);
-// Verify sum(logits) ≈ 1.0
-```
-
-#### 2.4 Attention @ V
-- [ ] Implement weighted sum of values
-- [ ] Optimize with AVX2
-- [ ] Handle multi-query pattern
-
-**File**: `src/ops/attention_ops.h`
-
-**Test**:
-```cpp
-// Test attention output
-float attn[10][32][100];  // Attention weights
-float V[100][4][64];       // Values
-float output[10][32][64];
-
-compute_attn_output(attn, V, output, 10, 100, 32, 4, 64);
-// Verify output computation
-```
-
-#### 2.5 RoPE (Rotary Positional Embeddings)
-- [ ] Implement frequency computation
-- [ ] Implement 2D rotation
-- [ ] Apply to queries and keys
-
-**File**: `src/ops/attention_ops.h`
-
-**Test**:
-```cpp
-// Test RoPE
-float Q[10][32][64];
-float K[10][4][64];
-
-apply_rotary_embeddings(Q, K, 10, 32, 4, 64);
-// Verify rotation is applied correctly
-```
-
-**Success Criteria**:
-- [ ] GEMM achieves >15 GFLOP/s
-- [ ] Attention computation produces correct results
-- [ ] Softmax is numerically stable
-- [ ] RoPE rotates vectors correctly
-
----
-
-## Phase 3: Transformer Components (Weeks 5-6)
-
-**Goal**: Implement transformer building blocks
+**Goal**: Implement 12-layer transformer with MQA
 
 ### Tasks
 
-#### 3.1 RMSNorm
+#### 2.1 Transformer Core
+- [ ] Implement token embeddings (50K × 768)
+- [ ] Implement RoPE positional encoding
+- [ ] Implement MQA (12 Q, 3 KV heads)
+- [ ] Implement SwiGLU MLP (768 → 3072 → 768)
 - [ ] Implement RMSNorm
-- [ ] Optimize with AVX2
-- [ ] Write unit tests
 
-**File**: `src/ops/layer_norm.h`
+**File**: `src/core/transformer_layer.h`
 
-**Test**:
-```cpp
-// Test RMSNorm
-float input[2048];
-float scale[2048] = {1.0, 1.0, ...};
-float output[2048];
+#### 2.2 Stack Transformer Layers
+- [ ] Create 12-layer transformer
+- [ ] Implement forward pass with residual connections
+- [ ] Add layer normalization
+- [ ] Test with random inputs
 
-rmsnorm(input, output, scale, 1, 1, 2048);
-// Verify normalization
-```
+#### 2.3 AVX2 Optimization
+- [ ] Optimize QK^T computation
+- [ ] Optimize softmax with AVX2
+- [ ] Optimize weighted sum
+- [ ] Achieve 4× speedup over scalar
 
-#### 3.2 SwiGLU Activation
-- [ ] Implement SwiGLU
-- [ ] Optimize with AVX2
-- [ ] Write unit tests
+**Target**: ~22 ms for 4096 tokens
 
-**File**: `src/ops/activation.h`
-
-**Test**:
-```cpp
-// Test SwiGLU
-float gate[2048];
-float up[2048];
-float output[2048];
-
-swiglu(gate, up, output, 2048);
-// Verify SwiGLU computation
-```
-
-#### 3.3 MLP Block
-- [ ] Implement gate/up projection
-- [ ] Implement activation
-- [ ] Implement down projection
-- [ ] Combine into MLP
-
-**File**: `src/core/mlp.cpp`
-
-**Test**: Verify forward pass produces correct output
-
-#### 3.4 Embedding Layer
-- [ ] Implement token embedding lookup
-- [ ] Implement SIMD gather
-- [ ] Write unit tests
-
-**File**: `src/core/embeddings.cpp`
-
-**Test**: Verify embedding lookup works
+#### 2.4 Memory Layout
+- [ ] Implement NHWC layout
+- [ ] Add 32-byte alignment
+- [ ] Implement cache blocking
+- [ ] Test memory access patterns
 
 **Success Criteria**:
-- [ ] RMSNorm produces correct normalized output
-- [ ] SwiGLU activation works correctly
-- [ ] MLP forward pass works
-- [ ] Embedding lookup returns correct vectors
+- [ ] Language encoder processes 4096 tokens in < 25 ms
+- [ ] MQA reduces KV cache by 8×
+- [ ] Memory footprint < 600 MB
 
 ---
 
-## Phase 4: Transformer Layer (Weeks 7-8)
+## Phase 3: Cross-Modal Fusion (Weeks 9-10)
 
-**Goal**: Implement complete transformer block
+**Goal**: Implement bidirectional cross-attention for vision-language fusion
 
 ### Tasks
 
-#### 4.1 Transformer Block
-- [ ] Combine attention, MLP, residuals
+#### 3.1 Cross-Attention Blocks
+- [ ] Implement V→L cross-attention
+- [ ] Implement L→V cross-attention
+- [ ] Add residual connections
+- [ ] Implement SwiGLU MLP for fusion
+- [ ] Stack 6 fusion blocks
+
+**File**: `src/core/cross_attention.h`
+
+#### 3.2 AVX2 Optimization
+- [ ] Optimize cross-modal attention
+- [ ] Implement batch processing for heads
+- [ ] Cache optimization for cross-modal ops
+- [ ] Achieve 4× speedup
+
+**Target**: ~8 ms for fusion (256×256 vision + 4096 language)
+
+#### 3.3 Joint Embedding Space
+- [ ] Implement projection layers (384/768 → 512)
+- [ ] Validate joint embedding quality
+- [ ] Test with multimodal inputs
+
+**Success Criteria**:
+- [ ] Cross-modal fusion completes in < 10 ms
+- [ ] Joint embeddings preserve both modalities
+- [ ] All AVX2 optimizations working
+
+---
+
+## Phase 4: JEPA Prediction Head (Weeks 11-12)
+
+**Goal**: Implement multi-step embedding prediction
+
+### Tasks
+
+#### 4.1 Context Encoder
+- [ ] Implement 4-layer transformer (hidden=512)
+- [ ] Add multi-head self-attention (8 heads)
+- [ ] Implement SwiGLU MLP
+- [ ] Test context encoding
+
+#### 4.2 Multi-Step Predictor
+- [ ] Implement z_{t+1} prediction MLP
+- [ ] Implement z_{t+2} prediction MLP
+- [ ] Implement z_{t+3} prediction MLP
+- [ ] Add step-wise weighting
+
+**File**: `src/core/jepa_predictor.h`
+
+#### 4.3 JEPA Loss
+- [ ] Implement MSE loss in embedding space
+- [ ] Implement multi-step loss weighting
+- [ ] Add numerical stability
+
+**File**: `src/ops/embedding_loss.h`
+
+**Success Criteria**:
+- [ ] JEPA head predicts 3-step embeddings
+- [ ] Loss computation is numerically stable
+- [ ] Memory footprint < 150 MB
+
+---
+
+## Phase 5: Auto-Regressive Head (Weeks 13-14)
+
+**Goal**: Implement 6-layer AR transformer for code generation
+
+### Tasks
+
+#### 5.1 AR Transformer
+- [ ] Implement projection (512 → 768)
+- [ ] Implement 6-layer transformer with causal mask
+- [ ] Add MQA (12 Q, 3 KV heads)
+- [ ] Implement KV cache
+
+**File**: `src/inference/autoregressive_head.h`
+
+#### 5.2 Language Model Head
+- [ ] Implement LM head (768 → 50K)
+- [ ] Implement sampling strategies (temperature, top-p, top-k)
+- [ ] Add beam search (optional)
+- [ ] Test generation quality
+
+#### 5.3 KV Cache Implementation
+- [ ] Implement cache structure
+- [ ] Add cache management
+- [ ] Implement cache append
+- [ ] Test cache efficiency
+
+**Target**: ~15 ms per token (text-only), ~28 ms (vision+text)
+
+**Success Criteria**:
+- [ ] AR head generates tokens at target speed
+- [ ] KV cache reduces computation by 50%
+- [ ] Sampling produces diverse outputs
+
+---
+
+## Phase 6: Training Infrastructure (Weeks 15-16)
+
+**Goal**: Implement hybrid training pipeline
+
+### Tasks
+
+#### 6.1 Hybrid Loss
+- [ ] Implement JEPA loss (MSE)
+- [ ] Implement LM loss (cross-entropy)
+- [ ] Implement combined loss (α=0.3, β=0.7)
+- [ ] Add gradient computation
+
+#### 6.2 Data Loading
+- [ ] Implement multimodal data loader
+- [ ] Add image processing pipeline
+- [ ] Implement JEPA masking strategy
+- [ ] Add data augmentation
+
+**File**: `src/training/dataloader.h`
+
+#### 6.3 Training Loop
+- [ ] Implement optimizer (AdamW)
+- [ ] Implement learning rate schedule
+- [ ] Add gradient clipping
+- [ ] Implement checkpointing
+
+#### 6.4 PyTorch Integration
+- [ ] Create PyTorch model matching C++ architecture
+- [ ] Implement training loop in Python
+- [ ] Add checkpoint conversion
+- [ ] Test training convergence
+
+**Success Criteria**:
+- [ ] Training loop runs without errors
+- [ ] Checkpoint saving/loading works
+- [ ] Loss decreases during training
+
+---
+
+## Phase 7: Inference Integration (Weeks 17-18)
+
+**Goal**: Integrate all components for multimodal inference
+
+### Tasks
+
+#### 7.1 Model Integration
+- [ ] Wire up all components (vision → language → fusion → JEPA → AR)
 - [ ] Implement forward pass
-- [ ] Add KV cache support
-- [ ] Write unit tests
+- [ ] Add input validation
+- [ ] Test end-to-end
 
-**File**: `src/core/transformer.cpp`
+**File**: `src/core/vljepa_model.h`
 
-**Test**:
-```cpp
-// Test transformer block
-float input[10][2048];  // 10 tokens, 2048 hidden
-float output[10][2048];
+#### 7.2 Inference API
+- [ ] Implement text-only inference
+- [ ] Implement multimodal inference
+- [ ] Add JEPA-guided generation
+- [ ] Implement streaming generation
 
-TransformerBlock block;
-block.forward(input, output, 10);
-// Verify output
-```
-
-#### 4.2 KV Cache
-- [ ] Implement KV cache storage
-- [ ] Implement cache update
-- [ ] Implement cache retrieval
-- [ ] Write unit tests
-
-**File**: `src/inference/kv_cache.cpp`
-
-**Test**:
-```cpp
-// Test KV cache
-KVCache cache(1, 4096, 24, 4, 64);
-
-// Update cache
-cache.update(0, k, v, 10, &cache_len);
-
-// Retrieve from cache
-cache.get(0, &k, &v, cache_len);
-// Verify cache contents
-```
+#### 7.3 Batch Processing
+- [ ] Add batch dimension support
+- [ ] Implement batching for efficiency
+- [ ] Test with batch_size > 1
 
 **Success Criteria**:
-- [ ] Transformer block forward pass works
-- [ ] KV cache stores and retrieves correctly
-- [ ] Residual connections work
+- [ ] End-to-end inference works
+- [ ] Throughput meets targets
+- [ ] Memory usage is reasonable
 
 ---
 
-## Phase 5: Tokenization (Weeks 9-10)
+## Phase 8: Python Bindings (Weeks 19-20)
 
-**Goal**: Implement code-aware tokenizer
+**Goal**: Create Python API using pybind11
 
 ### Tasks
 
-#### 5.1 Train BPE Tokenizer
-- [ ] Collect code corpus
-- [ ] Implement BPE training algorithm
-- [ ] Add code-specific merge rules
-- [ ] Save vocabulary
-
-**File**: `scripts/train_tokenizer.py`
-
-**Commands**:
-```bash
-python scripts/train_tokenizer.py \
-    --corpus data/code_corpus \
-    --vocab_size 50000 \
-    --output models/tokenizer.json
-```
-
-#### 5.2 Fast Encoding (C++)
-- [ ] Implement BPE encoding
-- [ ] Add special token handling
-- [ ] Optimize with AVX2
-- [ ] Write unit tests
-
-**File**: `src/io/tokenizer.cpp`
-
-**Test**:
-```cpp
-// Test tokenizer
-Tokenizer tokenizer("models/tokenizer.json");
-
-std::string text = "def hello():\n    print('Hello')";
-std::vector<int> tokens = tokenizer.encode(text);
-
-std::string decoded = tokenizer.decode(tokens);
-// Verify decoded == text
-```
-
-#### 5.3 Python Bindings
-- [ ] Create pybind11 bindings
-- [ ] Expose encode/decode methods
-- [ ] Add documentation
+#### 8.1 Core Bindings
+- [ ] Bind vision encoder
+- [ ] Bind language encoder
+- [ ] Bind cross-modal fusion
+- [ ] Bind JEPA head
+- [ ] Bind AR head
 
 **File**: `src/python/bindings.cpp`
 
-**Test**:
-```python
-# Test Python tokenizer
-from cromwell import Tokenizer
+#### 8.2 High-Level API
+- [ ] Create `CromwellVLJEPA` class
+- [ ] Add `generate()` method
+- [ ] Add `generate_multimodal()` method
+- [ ] Add `edit_file()` method
+- [ ] Create documentation
 
-tokenizer = Tokenizer("models/tokenizer.json")
-tokens = tokenizer.encode("def hello():")
-text = tokenizer.decode(tokens)
-```
+**File**: `src/python/cromwell/__init__.py`
+
+#### 8.3 CLI Tool
+- [ ] Implement `cromwell edit` command
+- [ ] Implement `cromwell complete` command
+- [ ] Implement `cromwell generate` command
+- [ ] Add help text and examples
+
+**File**: `src/cli/main.rs` (Rust) or `src/cli/main.cpp` (C++)
 
 **Success Criteria**:
-- [ ] Tokenizer trains successfully
-- [ ] Vocabulary contains 50,000 tokens
-- [ ] Encoding/decoding is lossless
-- [ ] Python bindings work
+- [ ] Python API works correctly
+- [ ] CLI tool is user-friendly
+- [ ] Examples run successfully
 
 ---
 
-## Phase 6: Model Integration (Weeks 11-12)
+## Phase 9: Testing & Optimization (Weeks 21-22)
 
-**Goal**: Integrate components into complete model
-
-### Tasks
-
-#### 6.1 Model Class
-- [ ] Stack transformer layers
-- [ ] Implement embedding layer
-- [ ] Implement final normalization
-- [ ] Implement LM head
-- [ ] Write unit tests
-
-**File**: `src/core/transformer.cpp`
-
-**Test**:
-```cpp
-// Test full model
-CromwellModel model("models/config.bin");
-
-int64_t input_ids[100] = {/* ... */};
-float logits[100][50000];
-
-model.forward(input_ids, logits, 1, 100);
-// Verify output shape and values
-```
-
-#### 6.2 Weight Initialization
-- [ ] Implement Kaiming initialization
-- [ ] Implement Xavier initialization
-- [ ] Initialize all layers
-
-**File**: `src/core/transformer.cpp`
-
-**Test**: Verify weights are initialized correctly
-
-#### 6.3 Checkpoint I/O
-- [ ] Implement save checkpoint
-- [ ] Implement load checkpoint
-- [ ] Add versioning
-
-**File**: `src/training/checkpoint.cpp`
-
-**Test**:
-```cpp
-// Test checkpoint save/load
-CromwellModel model1("models/config.bin");
-
-model1.save_checkpoint("models/checkpoint.bin");
-
-CromwellModel model2("models/config.bin");
-model2.load_checkpoint("models/checkpoint.bin");
-
-// Verify model1 == model2
-```
-
-**Success Criteria**:
-- [ ] Model forward pass works
-- [ ] Weights initialize correctly
-- [ ] Checkpoints save/load correctly
-
----
-
-## Phase 7: Inference Engine (Weeks 13-14)
-
-**Goal**: Implement text generation
+**Goal**: Comprehensive testing and performance optimization
 
 ### Tasks
 
-#### 7.1 Sampler
-- [ ] Implement greedy sampling
-- [ ] Implement temperature sampling
-- [ ] Implement top-p sampling
-- [ ] Implement top-k sampling
+#### 9.1 Unit Tests
+- [ ] Test vision encoder
+- [ ] Test language encoder
+- [ ] Test cross-modal fusion
+- [ ] Test JEPA head
+- [ ] Test AR head
 
-**File**: `src/inference/sampler.cpp`
+**File**: `tests/vljepa_test.cpp`
 
-**Test**:
-```cpp
-// Test sampler
-float logits[50000];
-// Fill with values
+#### 9.2 Integration Tests
+- [ ] Test end-to-end generation
+- [ ] Test multimodal generation
+- [ ] Test file editing
+- [ ] Test edge cases
 
-Sampler sampler(Sampler::TEMPERATURE, 0.8f);
-int token = sampler.sample(logits, 50000, rng);
-// Verify sampling distribution
-```
-
-#### 7.2 Text Generation
-- [ ] Implement generation loop
-- [ ] Add KV cache management
-- [ ] Implement stop token detection
-- [ ] Add streaming support
-
-**File**: `src/inference/generator.cpp`
-
-**Test**:
-```cpp
-// Test text generation
-TextGenerator generator(&model, &tokenizer, sampler);
-
-std::string prompt = "def fibonacci(n):";
-std::string output = generator.generate(prompt, config);
-// Verify output is valid code
-```
-
-**Success Criteria**:
-- [ ] Sampling works correctly
-- [ ] Generation produces coherent text
-- [ ] KV cache improves speed
-
----
-
-## Phase 8: Code Editing (Weeks 15-16)
-
-**Goal**: Implement file editing interface
-
-### Tasks
-
-#### 8.1 File I/O
-- [ ] Implement file reading
-- [ ] Implement file writing
-- [ ] Add .gitignore support
-
-**File**: `src/io/file_io.cpp`
-
-**Test**:
-```cpp
-// Test file I/O
-std::string content = read_file("test.py");
-// Modify content
-write_file("test_edited.py", content);
-// Verify file was written
-```
-
-#### 8.2 Diff Generation
-- [ ] Implement Myers diff algorithm
-- [ ] Generate unified diffs
-- [ ] Add syntax highlighting
-
-**File**: `src/io/diff.cpp`
-
-**Test**:
-```cpp
-// Test diff generation
-std::string before = "old content";
-std::string after = "new content";
-
-Diff diff = generate_diff(before, after, "test.py");
-// Verify diff is correct
-```
-
-#### 8.3 Diff Application
-- [ ] Parse unified diffs
-- [ ] Apply diffs safely
-- [ ] Add validation
-
-**File**: `src/io/diff.cpp`
-
-**Test**:
-```cpp
-// Test diff application
-std::string original = "original content";
-Diff diff = {/* ... */};
-
-std::string patched = apply_diff(original, diff);
-// Verify patch was applied correctly
-```
-
-#### 8.4 Context Manager
-- [ ] Implement file relevance scoring
-- [ ] Select context files
-- [ ] Manage token budget
-
-**File**: `src/io/context_manager.cpp`
-
-**Test**:
-```cpp
-// Test context selection
-ContextManager ctx_mgr;
-
-std::vector<FileInfo> context = ctx_mgr.select_context(
-    "src/main.py",
-    codebase,
-    4096  // max tokens
-);
-// Verify relevant files are selected
-```
-
-**Success Criteria**:
-- [ ] Files read/write correctly
-- [ ] Diffs generate correctly
-- [ ] Diffs apply safely
-- [ ] Context selection works
-
----
-
-## Phase 9: CLI & Python API (Weeks 17-18)
-
-**Goal**: Create user interfaces
-
-### Tasks
-
-#### 9.1 Python API
-- [ ] Create CodeEditor class
-- [ ] Add edit() method
-- [ ] Add complete() method
-- [ ] Add error handling
-
-**File**: `src/python/cromwell/editing.py`
-
-**Test**:
-```python
-# Test Python API
-from cromwell import CodeEditor
-
-editor = CodeEditor("model.bin", "tokenizer.json", "project/")
-result = editor.edit("main.py", "Add error handling")
-assert result.success
-```
-
-#### 9.2 CLI Tool
-- [ ] Implement edit command
-- [ ] Implement complete command
-- [ ] Add help text
-- [ ] Add error messages
-
-**File**: `cli/src/main.rs`
-
-**Test**:
-```bash
-# Test CLI
-cromwell edit main.py \
-    --instruction "Add error handling" \
-    --output main_edited.py
-```
-
-**Success Criteria**:
-- [ ] Python API works
-- [ ] CLI works
-- [ ] Error handling is robust
-
----
-
-## Phase 10: Optimization (Weeks 19-20)
-
-**Goal**: Optimize performance
-
-### Tasks
-
-#### 10.1 Profiling
-- [ ] Profile with perf
-- [ ] Identify bottlenecks
-- [ ] Measure cache misses
-
-**Commands**:
-```bash
-# Profile attention
-perf record -g ./benchmark_attention
-perf report
-
-# Profile cache misses
-perf stat -e cache-misses ./benchmark_attention
-```
-
-#### 10.2 Optimization
+#### 9.3 Performance Optimization
+- [ ] Profile bottlenecks
 - [ ] Optimize hot paths
-- [ ] Tune prefetch distance
+- [ ] Tune cache blocking
 - [ ] Optimize memory layout
-- [ ] Add NUMA support
 
-**Targets**:
-- Attention: >30 GFLOP/s
-- GEMM: >15 GFLOP/s
-- Generation: >50 tok/s
-
-#### 10.3 Benchmarking
-- [ ] Run full benchmarks
-- [ ] Compare to baselines
-- [ ] Generate report
-
-**Commands**:
-```bash
-# Run all benchmarks
-./scripts/benchmark.sh
-```
+#### 9.4 Benchmarking
+- [ ] Benchmark vision encoder
+- [ ] Benchmark language encoder
+- [ ] Benchmark cross-modal fusion
+- [ ] Benchmark generation
+- [ ] Measure memory usage
 
 **Success Criteria**:
-- [ ] Meets performance targets
-- [ ] Benchmark report is complete
+- [ ] All tests pass
+- [ ] Performance targets met
+- [ ] Memory usage < 2 GB
 
 ---
 
-## Testing Strategy
+## Phase 10: Documentation & Examples (Weeks 23-24)
 
-### Unit Tests
+**Goal**: Complete documentation and working examples
 
-```cpp
-// Example unit test
-TEST(Attention, QKDotProduct) {
-    float Q[2][2][2] = {
-        {{1, 2}, {3, 4}},
-        {{5, 6}, {7, 8}}
-    };
-    float K[3][1][2] = {
-        {{1, 0}},
-        {{0, 1}},
-        {{1, 1}}
-    };
-    float attn[2][2][3];
+### Tasks
 
-    compute_qk_attn(Q, K, attn, 2, 3, 2, 1, 2);
+#### 10.1 API Documentation
+- [ ] Document Python API
+- [ ] Document C++ API
+- [ ] Add usage examples
+- [ ] Create tutorials
 
-    // Verify: Q[0][0] @ K[0] = 1*1 + 2*0 = 1
-    EXPECT_FLOAT_EQ(attn[0][0][0], 1.0f);
-    EXPECT_FLOAT_EQ(attn[0][0][1], 2.0f);  // Q[0][0] @ K[1] = 1*0 + 2*1 = 2
-    EXPECT_FLOAT_EQ(attn[0][0][2], 3.0f);  // Q[0][0] @ K[2] = 1*1 + 2*1 = 3
-}
-```
+**File**: `docs/API.md`
 
-### Integration Tests
+#### 10.2 Performance Guide
+- [ ] Document performance characteristics
+- [ ] Add optimization tips
+- [ ] Include benchmarking results
+- [ ] Create performance guide
 
-```python
-# Example integration test
-def test_full_pipeline():
-    # Initialize
-    model = CromwellModel("model.bin")
-    tokenizer = Tokenizer("tokenizer.json")
-    editor = CodeEditor(model, tokenizer, "test_project/")
+**File**: `docs/PERFORMANCE.md`
 
-    # Edit file
-    result = editor.edit(
-        file_path="test.py",
-        instruction="Add docstring to function"
-    )
+#### 10.3 Examples
+- [ ] Create code completion example
+- [ ] Create code editing example
+- [ ] Create multimodal generation example
+- [ ] Create financial analysis example
 
-    # Verify
-    assert result.success
-    assert '"""' in result.edited_content
-```
+**File**: `examples/`
 
-### End-to-End Tests
+#### 10.4 README Updates
+- [ ] Update project description
+- [ ] Add installation instructions
+- [ ] Add quick start guide
+- [ ] Include performance benchmarks
 
-```bash
-# Test complete workflow
-cromwell edit test.py \
-    --instruction "Refactor to use list comprehension" \
-    --output test_edited.py
-
-# Verify output is valid Python
-python -m py_compile test_edited.py
-```
+**Success Criteria**:
+- [ ] Documentation is complete
+- [ ] Examples work correctly
+- [ ] README is clear and helpful
 
 ---
 
-## Debugging Tips
+## Success Criteria
 
-### Common Issues
+**Model Capabilities**:
+- [ ] Parameter count < 300M
+- [ ] Pass@1 > 55% on HumanEval
+- [ ] Generate syntactically valid code > 95% of time
+- [ ] Edit files accurately > 75% of time
+- [ ] Understand visual inputs (code highlighting, charts)
+- [ ] Handle 4096 token context windows
 
-**Issue**: Illegal instruction error
+**Performance**:
+- [ ] Text-only: > 40 tok/s on Ryzen 9 5900X
+- [ ] Vision+text: > 25 tok/s
+- [ ] Memory usage < 2 GB
+- [ ] Startup time < 50 ms
 
-**Cause**: CPU doesn't support AVX2
-
-**Solution**:
-```bash
-# Check CPU capabilities
-lscpu | grep avx2
-
-# If missing, use older CPU or build without AVX2
-```
-
-**Issue**: Slow inference
-
-**Cause**: Memory bandwidth bottleneck
-
-**Solution**:
-```bash
-# Pin threads to physical cores
-export OMP_PROC_BIND=close
-export OMP_PLACES=cores
-
-# Disable frequency scaling
-sudo cpupower frequency-set -g performance
-```
-
-**Issue**: NaN in output
-
-**Cause**: Numerical instability
-
-**Solution**:
-- Check softmax implementation
-- Verify normalization is stable
-- Add gradient clipping (for training)
+**Code Quality**:
+- [ ] Zero memory leaks
+- [ ] Handle malformed input gracefully
+- [ ] Safe file operations
+- [ ] Well-documented code
 
 ---
 
-## Performance Targets
-
-| Metric | Target | How to Measure |
-|--------|--------|----------------|
-| **Attention (QK^T)** | >30 GFLOP/s | `perf stat -e instructions ./benchmark_attention` |
-| **GEMM** | >15 GFLOP/s | `perf stat -e instructions ./benchmark_gemm` |
-| **Generation** | >50 tok/s | Time generation of 1000 tokens |
-| **Memory** | <5.5 GB | Measure with `/usr/bin/time -v` |
-| **Startup** | <100 ms | Time from program start to first token |
-
----
-
-## Next Steps After Implementation
-
-1. **Train Model**: Follow training pipeline design
-2. **Evaluate Benchmarks**: HumanEval, MBPP, Codeforces
-3. **Optimize Further**: Profile and tune
-4. **Document**: Write user guides
-5. **Release**: Package and distribute
-
----
-
-## Resources
-
-- [AMD Optimization Guide](https://www.amd.com/content/dam/amd/en/documents/processor-tech-docs/programming-guides/56569-Zhijing_Rev_Guide.pdf)
-- [Intel Intrinsics Guide](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html)
-- [LLaMA Architecture](https://arxiv.org/abs/2302.13971)
-- [Code Llama](https://arxiv.org/abs/2308.12950)
-
----
-
-**Good luck with the implementation!** Remember to test thoroughly at each phase and don't hesitate to iterate and optimize.
-
-**Document Status**: Complete
-**Last Updated**: 2025-01-14
+**Document Status**: Updated for VL-JEPA implementation
+**End of Design Documents**

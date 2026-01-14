@@ -1,7 +1,7 @@
-# Cromwell Agent: Tokenization Strategy
-## Code-Aware Byte Pair Encoding for Mixed English+Code
+# Cromwell VL-JEPA: Tokenization Strategy
+## Code-Aware Byte Pair Encoding for Vision-Language Mixed Input
 
-**Version**: 1.0
+**Version**: 2.0
 **Date**: 2025-01-14
 
 ---
@@ -76,8 +76,11 @@ Total: 50,000 tokens
 │   ├── Hex (0x00, 0xFF, ...)
 │   └── Binary (0b0, 0b1, ...)
 │
-├── Special tokens: 20 (0.04%)
+├── Special tokens: 30 (0.06%)
 │   ├── <FILE=path> : File start
+│   ├── <IMAGE> : Image input marker (NEW for VL-JEPA)
+│   ├── <VISION_START> : Vision token sequence start (NEW)
+│   ├── <VISION_END> : Vision token sequence end (NEW)
 │   ├── </FILE> : File end
 │   ├── <EDIT_START> : Edit region start
 │   ├── <EDIT_END> : Edit region end

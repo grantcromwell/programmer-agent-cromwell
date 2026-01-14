@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(cromwell_agent VERSION 1.0.0 LANGUAGES CXX)
+project(cromwell_vljepa VERSION 2.0.0 LANGUAGES CXX)
 
 # C++ standard
 set(CMAKE_CXX_STANDARD 17)
@@ -16,12 +16,13 @@ endif()
 # Find dependencies
 find_package(Threads REQUIRED)
 
-# Core library
+# Core library (updated for VL-JEPA)
 add_library(cromwell_core STATIC
-    src/core/transformer.cpp
-    src/core/attention.cpp
-    src/core/mlp.cpp
-    src/core/embeddings.cpp
+    src/core/vision_encoder.cpp
+    src/core/language_encoder.cpp
+    src/core/cross_attention.cpp
+    src/core/jepa_predictor.cpp
+    src/core/autoregressive_head.cpp
     src/core/config.cpp
 )
 
@@ -33,12 +34,15 @@ target_link_libraries(cromwell_core PUBLIC
     Threads::Threads
 )
 
-# Operations library
+# Operations library (updated for VL-JEPA)
 add_library(cromwell_ops STATIC
     src/ops/gemm.cpp
     src/ops/attention_ops.cpp
     src/ops/layer_norm.cpp
     src/ops/activation.cpp
+    src/ops/patch_ops.cpp
+    src/ops/vision_attention_ops.cpp
+    src/ops/embedding_loss.cpp
 )
 
 target_include_directories(cromwell_ops PUBLIC
